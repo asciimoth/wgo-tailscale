@@ -6,6 +6,10 @@ compatible control plane. It is a controller library, not a VPN application:
 the host owns the wgo device, its TUN, its private node key, and every
 operating-system setting.
 
+> [!WARNING]
+> This project is experimental. APIs and behavior can change without notice.
+> Do not use it for production systems without your own review and tests.
+
 It was reviewed against Tailscale capability version 145 but advertises
 capability version 119. That is the last version before peer-hosted UDP relay
 semantics, which this basic client intentionally leaves to standard
