@@ -1,0 +1,111 @@
+services:
+  certgen:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        mkdir -p /var/lib/headscale
+        if [ ! -s /var/lib/headscale/tls.crt ]; then
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+            -subj /CN=headscale \
+            -addext subjectAltName=DNS:headscale \
+            -keyout /var/lib/headscale/tls.key \
+            -out /var/lib/headscale/tls.crt
+        fi
+        chmod 600 /var/lib/headscale/tls.key
+    volumes:
+      - ./.state/headscale:/var/lib/headscale
+
+  headscale:
+    image: headscale/headscale:v0.29.3
+    command: serve
+    volumes:
+      - ./headscale/config.yaml:/etc/headscale/config.yaml:ro
+      - ./headscale/policy.hujson:/etc/headscale/policy.hujson:ro
+      - ./.state/headscale:/var/lib/headscale
+      - ./.state/run:/var/run/headscale
+    ports:
+      - "18443:8443"
+      - "13478:3478/udp"
+
+  registrar:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile
+    entrypoint: ["/bin/sh", "/scripts/register.sh"]
+    depends_on:
+      headscale:
+        condition: service_started
+    volumes:
+      - ./headscale/config.yaml:/etc/headscale/config.yaml:ro
+      - ./headscale/register.sh:/scripts/register.sh:ro
+      - ./.state/headscale:/var/lib/headscale
+      - ./.state/run:/var/run/headscale
+      - ./.state:/state
+
+  node-a:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile
+    depends_on:
+      headscale:
+        condition: service_started
+    environment:
+      NODE_NAME: node-a
+      OTHER_NODE: node-b
+      NODE_PRIVATE_HEX: "1111111111111111111111111111111111111111111111111111111111111111"
+      CONTROL_URL: https://headscale:8443
+      INSECURE_TLS: "1"
+      FORCE_DERP: "1"
+      STATE_DIR: /state
+    volumes:
+      - ./.state:/state
+
+  node-b:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile
+    depends_on:
+      headscale:
+        condition: service_started
+    environment:
+      NODE_NAME: node-b
+      OTHER_NODE: node-a
+      NODE_PRIVATE_HEX: "2222222222222222222222222222222222222222222222222222222222222222"
+      CONTROL_URL: https://headscale:8443
+      INSECURE_TLS: "1"
+      FORCE_DERP: "1"
+      STATE_DIR: /state
+    volumes:
+      - ./.state:/state
+
+  verifier:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        remaining=180
+        while [ "$$remaining" -gt 0 ]; do
+          if [ -s /state/node-a.success ] && [ -s /state/node-b.success ]; then
+            echo "Headscale registration and bidirectional wgo tunnel traffic passed"
+            exit 0
+          fi
+          remaining=$$((remaining - 1))
+          sleep 1
+        done
+        echo "timed out waiting for e2e clients" >&2
+        find /state -maxdepth 1 -type f -print >&2 || true
+        exit 1
+    depends_on:
+      registrar:
+        condition: service_started
+      node-a:
+        condition: service_started
+      node-b:
+        condition: service_started
+    volumes:
+      - ./.state:/state
