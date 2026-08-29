@@ -15,7 +15,7 @@ controller attached to that host:
 | [Tailscale](https://tailscale.com/kb/1151/what-is-tailscale)-owned peers | This client | Uses complete `UpsertPeer` specs and guarded `DeletePeer` calls |
 | Other peers | Other controllers | Never enumerated for replacement or bulk-deleted |
 | OS addresses, routes, DNS, firewall | Host | Exposed as desired/read-only views only |
-| Network I/O and name lookup | Supplied `gonnect.Network` | Mandatory path for every dial, listen, packet, and lookup operation |
+| Network I/O and name lookup | Supplied `gonnect.Network` | Mandatory path for control, lookup, STUN, DISCO, DERP, and direct peer traffic unless direct endpoints use wgo's default transport |
 
 The client rejects a zero wgo private key. Cached state contains the node public
 key fingerprint, so reusing cache with a different wgo node key fails with
@@ -60,9 +60,9 @@ retain raw node JSON where forward-compatible fields are not understood.
 
 ### [Tailnet](https://tailscale.com/docs/concepts/tailnet) transport
 
-The client owns one named wgo `batchudp.Bind`. A wgo peer endpoint is a stable
-logical `nodekey:...`, not a frozen socket address. The bind selects a current
-path behind that endpoint:
+The client owns one named wgo `batchudp.Bind`. By default, a wgo peer endpoint
+is a stable logical `nodekey:...`, not a frozen socket address. The bind selects
+a current path behind that endpoint:
 
 1. authenticated DISCO direct UDP, when a probe succeeds;
 2. a control-provided direct endpoint for WireGuard-only peers;
@@ -100,6 +100,12 @@ with port zero when DERP is enabled, skips UDP discovery, and operates in
 DERP-only mode. If a UDP socket exists but outbound UDP is filtered, ordinary
 netcheck/path fallback reaches the same TLS transport.
 
+When `Options.UseDefaultTransportForDirectPeers` is set, direct UDP endpoints
+are written with wgo's default transport instead. DERP-capable peers stay on the
+named transport until a direct path is known. DERP traffic always stays on the
+named transport because the default wgo transport cannot parse logical DERP
+peer endpoints.
+
 ### Map reducer and views
 
 Full and delta map responses feed one mutex-protected reducer. It maintains:
@@ -119,12 +125,16 @@ and the desired network emits a final down transition during shutdown.
 ### Peer reconciliation and conflicts
 
 The desired peer set contains control peers that pass local confirmation. For
-each desired peer, the client publishes a complete `device.PeerSpec` selecting
-its named transport. For a removed peer it calls `DeletePeer` only when the
-current spec still selects this client's transport.
+each desired peer, the client publishes a complete `device.PeerSpec`. By
+default the spec selects its named transport. With
+`UseDefaultTransportForDirectPeers`, direct specs can select wgo's default
+transport. For a removed peer it calls `DeletePeer` only when the current spec
+still has the endpoint this client wrote.
 
 If a public key already has a spec on another transport, the client reports
-`ErrPeerConflict` and leaves that spec untouched. It never uses
+`ErrPeerConflict` and leaves that spec untouched. In default-transport direct
+mode, a pre-existing default-transport spec is also a conflict because that
+transport is not controller-specific. The client never uses
 `RemoveAllPeers`, replace-peers configuration, or a device-wide key setter.
 Expired nodes and unsigned peer-API-only nodes remain visible in snapshots but
 are never published as WireGuard peers.

@@ -21,7 +21,8 @@ Implemented features:
   [DISCO](https://pkg.go.dev/tailscale.com/disco) probing, and DERP over TLS
   fallback with latency-aware home-region selection;
 - publication of complete peer specifications through wgo's multi-controller
-  `UpsertPeer`/`DeletePeer` API and a named transport;
+  `UpsertPeer`/`DeletePeer` API and a named transport, with an option to use
+  wgo's default transport for direct UDP peer endpoints;
 - optional local peer confirmation and optional AmneziaWG configuration;
 - UI-neutral authentication interactions and change subscriptions;
 - versioned callback-based cache state;
@@ -35,8 +36,10 @@ The library does not create a TUN, create or close the wgo device, change the
 wgo node key, install routes or addresses, change system DNS, or administer a
 [tailnet](https://tailscale.com/docs/concepts/tailnet).
 
-Every network operation requires a `gonnect.Network` passed to `tailscale.New`.
-There is no direct-network fallback.
+Every control-plane, DNS, STUN, DISCO, and DERP operation requires a
+`gonnect.Network` passed to `tailscale.New`. Direct peer traffic also uses that
+network by default. Set `Options.UseDefaultTransportForDirectPeers` when wgo's
+default transport already sends packets through the wanted network.
 
 ## Minimal controller setup
 

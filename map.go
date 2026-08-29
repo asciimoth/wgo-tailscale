@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"net/netip"
 	"slices"
 	"sort"
 	"time"
@@ -440,6 +441,8 @@ type desiredPeer struct {
 	node     *controlproto.Node
 	id       string
 	homeDERP int64
+	path     PathKind
+	direct   netip.AddrPort
 }
 
 func (c *Client) reconcilePeers() {
@@ -454,7 +457,16 @@ func (c *Client) reconcilePeers() {
 			if home == 0 {
 				home = c.preferredDERP
 			}
-			desired[node.Key] = desiredPeer{node: cloneControlNode(node), id: id, homeDERP: home}
+			var path PathKind
+			var direct netip.AddrPort
+			if local := c.peerLocal[node.Key]; local != nil {
+				path = local.path
+				direct = local.direct
+			}
+			desired[node.Key] = desiredPeer{
+				node: cloneControlNode(node), id: id, homeDERP: home,
+				path: path, direct: direct,
+			}
 		}
 	}
 	applied := maps.Clone(c.applied)
@@ -466,9 +478,9 @@ func (c *Client) reconcilePeers() {
 			continue
 		}
 		public := device.NoisePublicKey(key)
-		if current, ok := c.device.PeerSpec(public); ok && current.Endpoint != nil && current.Endpoint.Transport == c.opts.TransportID {
+		if current, ok := c.device.PeerSpec(public); ok && peerSpecStillOwned(current, applied[key]) {
 			if _, err := c.device.DeletePeer(public); err != nil {
-				c.setPeerError(key, fmt.Errorf("tailscale: remove peer %s: %w", applied[key], err))
+				c.setPeerError(key, fmt.Errorf("tailscale: remove peer %s: %w", applied[key].id, err))
 				continue
 			}
 		}
@@ -487,19 +499,21 @@ func (c *Client) reconcilePeers() {
 	for key, wanted := range desired {
 		public := device.NoisePublicKey(key)
 		current, exists := c.device.PeerSpec(public)
-		_, alreadyOwned := applied[key]
-		if exists && (current.Endpoint == nil || current.Endpoint.Transport != c.opts.TransportID) {
-			if alreadyOwned {
-				c.mu.Lock()
-				delete(c.applied, key)
-				if local := c.peerLocal[key]; local != nil {
-					local.applied = false
-				}
-				c.mu.Unlock()
-				if c.bind != nil {
-					c.bind.RemovePeer(key)
-				}
+		owned, alreadyOwned := applied[key]
+		if alreadyOwned && exists && !peerSpecStillOwned(current, owned) {
+			c.mu.Lock()
+			delete(c.applied, key)
+			if local := c.peerLocal[key]; local != nil {
+				local.applied = false
 			}
+			c.mu.Unlock()
+			if c.bind != nil {
+				c.bind.RemovePeer(key)
+			}
+			c.setPeerError(key, ErrPeerConflict)
+			continue
+		}
+		if !alreadyOwned && exists && (current.Endpoint == nil || current.Endpoint.Transport != c.opts.TransportID) {
 			c.setPeerError(key, ErrPeerConflict)
 			continue
 		}
@@ -521,7 +535,7 @@ func (c *Client) reconcilePeers() {
 		}
 		spec := device.PeerSpec{
 			PublicKey: public, ProtocolVersion: 1, AllowedIPs: allowed,
-			Endpoint:  &device.PeerEndpoint{Transport: c.opts.TransportID, Address: key.String()},
+			Endpoint:  c.peerEndpoint(wanted),
 			AmneziaWG: amnezia, Activation: device.PeerActivationEager,
 		}
 		if err := c.device.UpsertPeer(spec); err != nil {
@@ -532,7 +546,7 @@ func (c *Client) reconcilePeers() {
 			continue
 		}
 		c.mu.Lock()
-		c.applied[key] = wanted.id
+		c.applied[key] = newAppliedPeer(wanted.id, spec.Endpoint)
 		local := c.peerLocal[key]
 		if local == nil {
 			local = &peerLocalState{}
@@ -552,6 +566,48 @@ func (c *Client) reconcilePeers() {
 		c.events.publish(peerEvent)
 		c.events.publish(networkEvent)
 	}
+}
+
+func (c *Client) peerEndpoint(peer desiredPeer) *device.PeerEndpoint {
+	if c.opts.UseDefaultTransportForDirectPeers {
+		if peer.path == PathDirect && peer.direct.IsValid() {
+			return &device.PeerEndpoint{Transport: device.DefaultTransportID, Address: peer.direct.String()}
+		}
+		if peer.node.IsWireGuardOnly || c.opts.DisableDERP {
+			if endpoint := firstUsableEndpoint(peer.node.Endpoints); endpoint.IsValid() {
+				return &device.PeerEndpoint{Transport: device.DefaultTransportID, Address: endpoint.String()}
+			}
+		}
+	}
+	return &device.PeerEndpoint{Transport: c.opts.TransportID, Address: peer.node.Key.String()}
+}
+
+func firstUsableEndpoint(endpoints []netip.AddrPort) netip.AddrPort {
+	for _, endpoint := range endpoints {
+		addr := endpoint.Addr().Unmap()
+		if !addr.IsValid() || addr.IsUnspecified() || addr.IsMulticast() || endpoint.Port() == 0 {
+			continue
+		}
+		return netip.AddrPortFrom(addr, endpoint.Port())
+	}
+	return netip.AddrPort{}
+}
+
+func newAppliedPeer(id string, endpoint *device.PeerEndpoint) appliedPeer {
+	if endpoint == nil {
+		return appliedPeer{id: id}
+	}
+	return appliedPeer{id: id, endpoint: *endpoint, hasEndpoint: true}
+}
+
+func peerSpecStillOwned(spec device.PeerSpec, applied appliedPeer) bool {
+	if spec.Endpoint == nil {
+		return !applied.hasEndpoint
+	}
+	if !applied.hasEndpoint {
+		return false
+	}
+	return spec.Endpoint.Transport == applied.endpoint.Transport && spec.Endpoint.Address == applied.endpoint.Address
 }
 
 func (c *Client) setPeerError(key controlproto.NodePublic, err error) {

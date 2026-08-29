@@ -268,6 +268,133 @@ func TestSharedDevicePreservesOtherControllerPeers(t *testing.T) {
 	}
 }
 
+func TestDefaultTransportForDirectPeersUsesWGODefault(t *testing.T) {
+	dev := newFakeDevice(t)
+	client, err := New(gonnect.NativeConfig{}.Build(), dev, Options{
+		Hostname: "default-direct", TLSConfig: testTLSConfig(),
+		UseDefaultTransportForDirectPeers: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := newControlNode(t, 2, "direct-peer", "direct.example.test", "100.64.0.2/32")
+	peer.IsWireGuardOnly = true
+	if err := client.applyMapResponse(controlproto.MapResponse{Peers: []*controlproto.Node{peer}}); err != nil {
+		t.Fatal(err)
+	}
+	spec, ok := dev.PeerSpec(device.NoisePublicKey(peer.Key))
+	if !ok || spec.Endpoint == nil {
+		t.Fatalf("wgo peer spec = %#v, %v", spec, ok)
+	}
+	if spec.Endpoint.Transport != device.DefaultTransportID || spec.Endpoint.Address != peer.Endpoints[0].String() {
+		t.Fatalf("endpoint = %#v, want default transport %s", spec.Endpoint, peer.Endpoints[0])
+	}
+}
+
+func TestDefaultTransportForKnownDirectPathUsesWGODefault(t *testing.T) {
+	dev := newFakeDevice(t)
+	client, err := New(gonnect.NativeConfig{}.Build(), dev, Options{
+		Hostname: "default-known-direct", TLSConfig: testTLSConfig(),
+		UseDefaultTransportForDirectPeers: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := newControlNode(t, 2, "known-direct", "known.example.test", "100.64.0.2/32")
+	direct := netip.MustParseAddrPort("198.51.100.20:41641")
+	client.peerLocal[peer.Key] = &peerLocalState{path: PathDirect, direct: direct}
+	if err := client.applyMapResponse(controlproto.MapResponse{Peers: []*controlproto.Node{peer}}); err != nil {
+		t.Fatal(err)
+	}
+	spec, ok := dev.PeerSpec(device.NoisePublicKey(peer.Key))
+	if !ok || spec.Endpoint == nil {
+		t.Fatalf("wgo peer spec = %#v, %v", spec, ok)
+	}
+	if spec.Endpoint.Transport != device.DefaultTransportID || spec.Endpoint.Address != direct.String() {
+		t.Fatalf("endpoint = %#v, want known direct endpoint", spec.Endpoint)
+	}
+}
+
+func TestDefaultTransportForDirectPeersKeepsNamedDERPEndpoint(t *testing.T) {
+	dev := newFakeDevice(t)
+	client, err := New(gonnect.NativeConfig{}.Build(), dev, Options{
+		Hostname: "default-direct-derp", TLSConfig: testTLSConfig(),
+		UseDefaultTransportForDirectPeers: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := newControlNode(t, 2, "derp-peer", "derp.example.test", "100.64.0.2/32")
+	if err := client.applyMapResponse(controlproto.MapResponse{Peers: []*controlproto.Node{peer}}); err != nil {
+		t.Fatal(err)
+	}
+	spec, ok := dev.PeerSpec(device.NoisePublicKey(peer.Key))
+	if !ok || spec.Endpoint == nil {
+		t.Fatalf("wgo peer spec = %#v, %v", spec, ok)
+	}
+	if spec.Endpoint.Transport != DefaultTransportID || spec.Endpoint.Address != peer.Key.String() {
+		t.Fatalf("endpoint = %#v, want named DERP-capable endpoint", spec.Endpoint)
+	}
+}
+
+func TestDefaultTransportForDirectPeersTreatsExistingDefaultPeerAsConflict(t *testing.T) {
+	dev := newFakeDevice(t)
+	client, err := New(gonnect.NativeConfig{}.Build(), dev, Options{
+		Hostname: "default-direct-conflict", TLSConfig: testTLSConfig(),
+		UseDefaultTransportForDirectPeers: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := newControlNode(t, 2, "default-conflict", "conflict.example.test", "100.64.0.2/32")
+	key := device.NoisePublicKey(peer.Key)
+	dev.peers[key] = device.PeerSpec{
+		PublicKey: key, ProtocolVersion: 1,
+		Endpoint: &device.PeerEndpoint{Transport: device.DefaultTransportID, Address: "198.51.100.8:12345"},
+	}
+	peer.IsWireGuardOnly = true
+	if err := client.applyMapResponse(controlproto.MapResponse{Peers: []*controlproto.Node{peer}}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := client.Peer("default-conflict")
+	if got.AppliedToWGO || !strings.Contains(got.LastError, ErrPeerConflict.Error()) {
+		t.Fatalf("conflicting peer = %#v", got)
+	}
+	spec, _ := dev.PeerSpec(key)
+	if spec.Endpoint.Address != "198.51.100.8:12345" || spec.Endpoint.Transport != device.DefaultTransportID {
+		t.Fatalf("existing default peer was overwritten: %#v", spec)
+	}
+}
+
+func TestDefaultTransportOwnedPeerRemovalRequiresUnchangedEndpoint(t *testing.T) {
+	dev := newFakeDevice(t)
+	client, err := New(gonnect.NativeConfig{}.Build(), dev, Options{
+		Hostname: "default-direct-removal", TLSConfig: testTLSConfig(),
+		UseDefaultTransportForDirectPeers: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := newControlNode(t, 2, "default-removal", "removal.example.test", "100.64.0.2/32")
+	peer.IsWireGuardOnly = true
+	if err := client.applyMapResponse(controlproto.MapResponse{Peers: []*controlproto.Node{peer}}); err != nil {
+		t.Fatal(err)
+	}
+	key := device.NoisePublicKey(peer.Key)
+	dev.mu.Lock()
+	dev.peers[key] = device.PeerSpec{
+		PublicKey: key, ProtocolVersion: 1,
+		Endpoint: &device.PeerEndpoint{Transport: device.DefaultTransportID, Address: "198.51.100.9:12345"},
+	}
+	dev.mu.Unlock()
+	if err := client.applyMapResponse(controlproto.MapResponse{Peers: []*controlproto.Node{}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := dev.PeerSpec(key); !ok {
+		t.Fatal("changed default-transport peer was deleted")
+	}
+}
+
 func TestPeerOnlyAndExpiredNodesAreNeverPublishedToWGO(t *testing.T) {
 	client, dev := newUnitClient(t, false)
 	peerAPIOnly := newControlNode(t, 2, "peer-api-only", "api.tail.example", "100.64.0.2/32")

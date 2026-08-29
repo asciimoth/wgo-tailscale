@@ -7,7 +7,7 @@ configuration.
 
 | Requirement | Status | Public surface / implementation | Main verification |
 |---|---|---|---|
-| Mandatory application network | Implemented | `New(gonnect.Network, ...)` rejects nil; control, lookup, UDP, STUN, DISCO, DERP, and HTTPS netcheck all use that instance | production-code direct-network audit; tailnet integration tests |
+| Mandatory application network | Implemented | `New(gonnect.Network, ...)` rejects nil; control, lookup, STUN, DISCO, DERP, HTTPS netcheck, and direct peer traffic use that instance unless `UseDefaultTransportForDirectPeers` puts direct peer endpoints on wgo's default transport | production-code direct-network audit; tailnet integration tests |
 | Existing wgo node key | Implemented | `Start` reads `WGODevice.PrivateKey`; no key setter is in `WGODevice`; control self-key mismatch and cache identity changes fail | `TestStartUsesExistingWGOKey`, `TestControlSelfKeyMustMatchExistingWGOIdentity` |
 | Control authentication and registration | Implemented | `/key`, ts2021 Noise IK, `/machine/register`, auth keys, cancellable authorization follow-ups | Noise tests; Headscale cycle; optional hosted-service test |
 | Streaming control updates | Implemented | framed `/machine/map`, keepalives, full maps, deltas, patches, removals, session resume metadata, liveness pings | reducer tests; Headscale cycle |

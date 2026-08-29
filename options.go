@@ -70,6 +70,9 @@ type Options struct {
 	// TransportID names the wgo transport owned by this client. It must not be
 	// the empty default-UDP transport ID.
 	TransportID device.TransportID
+	// UseDefaultTransportForDirectPeers uses wgo's default transport for direct
+	// UDP peer endpoints. DERP traffic still uses this client's named transport.
+	UseDefaultTransportForDirectPeers bool
 	// ListenPort requests a local UDP port. Zero asks the network for one.
 	ListenPort uint16
 	// InterfaceName and MTU describe the desired interface in

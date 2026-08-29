@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
 	"runtime"
@@ -66,7 +67,7 @@ type Client struct {
 	self          *controlproto.Node
 	peers         map[int64]*controlproto.Node
 	peerLocal     map[controlproto.NodePublic]*peerLocalState
-	applied       map[controlproto.NodePublic]string
+	applied       map[controlproto.NodePublic]appliedPeer
 	users         []controlproto.UserProfile
 	dns           *controlproto.DNSConfig
 	filters       []controlproto.FilterRule
@@ -97,8 +98,15 @@ type peerLocalState struct {
 	err     string
 }
 
-// New constructs a client. Network is mandatory and is the only source used
-// for control, DNS, UDP, STUN, DISCO, and DERP connections.
+type appliedPeer struct {
+	id          string
+	endpoint    device.PeerEndpoint
+	hasEndpoint bool
+}
+
+// New constructs a client. Network is mandatory for control, DNS, STUN, DISCO,
+// and DERP. Direct peer traffic also uses it unless Options selects wgo's
+// default transport for direct peers.
 func New(network gonnect.Network, dev WGODevice, options Options) (*Client, error) {
 	if err := validateDependencies(network, dev); err != nil {
 		return nil, err
@@ -119,7 +127,7 @@ func New(network gonnect.Network, dev WGODevice, options Options) (*Client, erro
 		confirmed:    make(map[string]bool),
 		peers:        make(map[int64]*controlproto.Node),
 		peerLocal:    make(map[controlproto.NodePublic]*peerLocalState),
-		applied:      make(map[controlproto.NodePublic]string),
+		applied:      make(map[controlproto.NodePublic]appliedPeer),
 		namedFilters: make(map[string][]controlproto.FilterRule),
 		derpLatency:  make(map[int64]tailnet.DERPRegionLatency),
 	}, nil
@@ -633,6 +641,9 @@ func (c *Client) onPath(update tailnet.PathUpdate) {
 	event := c.eventLocked(EventPeerPath, nil)
 	c.mu.Unlock()
 	c.events.publish(event)
+	if c.opts.UseDefaultTransportForDirectPeers {
+		go c.reconcilePeers()
+	}
 }
 
 func (c *Client) onDERPLatency(report tailnet.DERPLatencyReport) {
@@ -714,15 +725,16 @@ func (c *Client) removeOwnedPeers() error {
 	c.reconcileMu.Lock()
 	defer c.reconcileMu.Unlock()
 	c.mu.RLock()
-	keys := make([]controlproto.NodePublic, 0, len(c.applied))
-	for key := range c.applied {
+	applied := maps.Clone(c.applied)
+	keys := make([]controlproto.NodePublic, 0, len(applied))
+	for key := range applied {
 		keys = append(keys, key)
 	}
 	c.mu.RUnlock()
 	var errs []error
 	for _, key := range keys {
 		public := device.NoisePublicKey(key)
-		if spec, ok := c.device.PeerSpec(public); ok && spec.Endpoint != nil && spec.Endpoint.Transport == c.opts.TransportID {
+		if spec, ok := c.device.PeerSpec(public); ok && peerSpecStillOwned(spec, applied[key]) {
 			if _, err := c.device.DeletePeer(public); err != nil {
 				errs = append(errs, err)
 			}

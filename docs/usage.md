@@ -177,6 +177,26 @@ The value is descriptive. The library does not create an interface, add an
 address, install a route, or configure DNS. Use `EventNetwork` to trigger the
 application's own reconciliation and compare `Revision` to avoid stale work.
 
+## Use wgo's default transport for direct peers
+
+By default, peer traffic uses the Tailscale named transport. That transport
+selects direct UDP or DERP behind one logical peer endpoint.
+
+If the host already configured wgo's default transport to send UDP through the
+wanted network, direct peer endpoints can use that default transport:
+
+```go
+client, err := tailscale.New(network, dev, tailscale.Options{
+    Hostname: "my-vpn-node",
+    TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+    UseDefaultTransportForDirectPeers: true,
+})
+```
+
+DERP still uses the named transport. A peer that already exists on wgo's default
+transport before this client applies it is reported as `ErrPeerConflict`,
+because the default transport does not identify one controller.
+
 ## Inspect DERP selection
 
 `DERP` is also a read-only live view. It identifies the selected home region
