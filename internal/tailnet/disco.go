@@ -121,6 +121,9 @@ func (b *Bind) wrapDisco(peer controlproto.DiscoPublic, payload []byte) ([]byte,
 }
 
 func (b *Bind) handleDisco(packet []byte, source netip.AddrPort, derpSource controlproto.NodePublic, viaDERP bool) bool {
+	if b.cfg.DisableDiscovery {
+		return false
+	}
 	if len(packet) < discoHeaderLen+24 || string(packet[:len(discoMagic)]) != discoMagic {
 		return false
 	}

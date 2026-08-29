@@ -229,7 +229,7 @@ func (b *Bind) Open(port uint16) ([]batchudp.ReceiveFunc, uint16, error) {
 			b.byAddr[candidate] = key
 		}
 	}
-	if conn != nil {
+	if conn != nil && !b.cfg.DisableDiscovery {
 		b.local = b.localEndpointsLocked(actual)
 	} else {
 		b.local = nil
@@ -486,6 +486,9 @@ func (b *Bind) UpdateDERPMap(derpMap *controlproto.DERPMap, selfHome int64) {
 }
 
 func (b *Bind) CurrentEndpoints() []EndpointCandidate {
+	if b.cfg.DisableDiscovery {
+		return nil
+	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.endpointsLocked()
@@ -610,6 +613,9 @@ func sanitizeEndpoints(endpoints []netip.AddrPort) []netip.AddrPort {
 }
 
 func (b *Bind) refreshLocalEndpoints(generation uint64) {
+	if b.cfg.DisableDiscovery {
+		return
+	}
 	b.mu.RLock()
 	if !b.open || b.generation != generation || b.conn == nil {
 		b.mu.RUnlock()
@@ -640,7 +646,7 @@ func (b *Bind) readUDP(ctx context.Context, generation uint64, conn gonnect.UDPC
 			return
 		}
 		packet := buffer[:n]
-		if b.handleSTUN(packet) || b.handleDisco(packet, source, controlproto.NodePublic{}, false) {
+		if b.handleSTUN(packet) || (!b.cfg.DisableDiscovery && b.handleDisco(packet, source, controlproto.NodePublic{}, false)) {
 			continue
 		}
 		b.mu.RLock()

@@ -167,6 +167,48 @@ func TestBindCanOpenInDERPOnlyModeWithoutUDP(t *testing.T) {
 	_ = withoutDERP.Shutdown()
 }
 
+func TestDiscoveryCanBeDisabledWhileDERPRemainsEnabled(t *testing.T) {
+	discovered := netip.MustParseAddrPort("192.0.2.20:41641")
+	bind, err := NewBind(Config{
+		Network: gonnect.NativeConfig{}.Build(), NodePrivate: mustPrivate(t),
+		DiscoPrivate: mustPrivate(t), TLSConfig: testTLSConfig(),
+		DisableDiscovery: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bind.cfg.DisableDERP {
+		t.Fatal("DERP was disabled with discovery")
+	}
+	bind.local = []EndpointCandidate{{Addr: discovered}}
+	bind.stun = map[netip.AddrPort]EndpointCandidate{
+		discovered: {Addr: discovered},
+	}
+	if endpoints := bind.CurrentEndpoints(); len(endpoints) != 0 {
+		t.Fatalf("disabled discovery endpoints = %#v", endpoints)
+	}
+}
+
+func TestDiscoveryCanRemainEnabledWhileDERPIsDisabled(t *testing.T) {
+	discovered := netip.MustParseAddrPort("192.0.2.21:41641")
+	bind, err := NewBind(Config{
+		Network: gonnect.NativeConfig{}.Build(), NodePrivate: mustPrivate(t),
+		DiscoPrivate: mustPrivate(t), TLSConfig: testTLSConfig(),
+		DisableDERP: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bind.cfg.DisableDiscovery {
+		t.Fatal("discovery was disabled with DERP")
+	}
+	bind.local = []EndpointCandidate{{Addr: discovered}}
+	endpoints := bind.CurrentEndpoints()
+	if len(endpoints) != 1 || endpoints[0].Addr != discovered {
+		t.Fatalf("enabled discovery endpoints = %#v", endpoints)
+	}
+}
+
 func TestBindDERPFailureFallsBackToControlCandidate(t *testing.T) {
 	newBind := func() *Bind {
 		bind, err := NewBind(Config{

@@ -82,9 +82,10 @@ type Options struct {
 
 	// DisableDERP disables the TLS DERP fallback. Direct UDP remains enabled.
 	DisableDERP bool
-	// DisableDiscovery disables STUN and Disco probing. Control-provided direct
-	// endpoints remain available; WireGuard-only peers use them as their primary
-	// path and other peers use them if DERP is unavailable.
+	// DisableDiscovery disables local endpoint advertisement, STUN, and Disco.
+	// Control-provided direct endpoints remain available; WireGuard-only peers
+	// use them as their primary path and other peers use them if DERP is
+	// unavailable.
 	DisableDiscovery bool
 
 	// TLSConfig configures all outgoing TLS connections. It is required and is

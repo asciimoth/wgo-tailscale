@@ -53,6 +53,41 @@ func TestAuthenticatedDiscoPingSelectsDirectPath(t *testing.T) {
 	}
 }
 
+func TestDisabledDiscoveryIgnoresAuthenticatedDiscoPing(t *testing.T) {
+	aNode := mustPrivate(t)
+	bNode := mustPrivate(t)
+	aDisco := mustPrivate(t)
+	bDisco := mustPrivate(t)
+	b := &Bind{
+		cfg: Config{
+			NodePrivate: bNode, DiscoPrivate: bDisco,
+			DisableDiscovery: true,
+		},
+		open: true, peers: make(map[controlproto.NodePublic]*peerState),
+		byDisco: make(map[controlproto.DiscoPublic]controlproto.NodePublic),
+		byAddr:  make(map[netip.AddrPort]controlproto.NodePublic), pending: make(map[[12]byte]pendingPing),
+	}
+	aPublic := aNode.PublicNode()
+	b.peers[aPublic] = &peerState{config: PeerConfig{NodeKey: aPublic, DiscoKey: aDisco.PublicDisco()}}
+	b.byDisco[aDisco.PublicDisco()] = aPublic
+	a := &Bind{cfg: Config{NodePrivate: aNode, DiscoPrivate: aDisco}}
+	var tx [12]byte
+	_, _ = rand.Read(tx[:])
+	payload := append([]byte{discoPing, discoVersion}, tx[:]...)
+	payload = aPublic.AppendTo(payload)
+	packet, err := a.wrapDisco(bDisco.PublicDisco(), payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := netip.MustParseAddrPort("192.0.2.20:41641")
+	if b.cfg.DisableDiscovery && b.handleDisco(packet, source, controlproto.NodePublic{}, false) {
+		t.Fatal("disabled discovery accepted a DISCO packet")
+	}
+	if got := b.peers[aPublic].direct; got.IsValid() {
+		t.Fatalf("disabled discovery learned direct endpoint %v", got)
+	}
+}
+
 func mustPrivate(t *testing.T) controlproto.PrivateKey {
 	t.Helper()
 	key, err := controlproto.NewPrivateKey()
