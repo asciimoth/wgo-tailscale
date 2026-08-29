@@ -1,0 +1,17 @@
+{
+  "controlURL": "https://controlplane.tailscale.com",
+  "hostnamePrefix": "wgo-tailscale-real-e2e",
+  "authKey": "",
+  "cacheDir": "real-service-cache",
+  "timeout": "10m",
+  "nodes": [
+    {
+      "hostname": "wgo-tailscale-real-e2e-a",
+      "nodePrivateHex": "replace-with-64-lowercase-hex-characters"
+    },
+    {
+      "hostname": "wgo-tailscale-real-e2e-b",
+      "nodePrivateHex": "replace-with-64-lowercase-hex-characters"
+    }
+  ]
+}
