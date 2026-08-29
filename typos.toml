@@ -1,0 +1,10 @@
+[default.extend-words]
+pn = "pn"
+nd6 = "nd6"
+nd = "nd"
+oif = "oif"
+ba = "ba"
+
+[files]
+extend-exclude = ["*_test.go"]
+
