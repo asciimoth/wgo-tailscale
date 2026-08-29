@@ -1,0 +1,75 @@
+server_url: https://headscale-beta:8443
+listen_addr: 0.0.0.0:8443
+metrics_listen_addr: ""
+grpc_listen_addr: 0.0.0.0:50443
+grpc_allow_insecure: true
+trusted_proxies: []
+
+noise:
+  private_key_path: /var/lib/headscale/noise_private.key
+
+prefixes:
+  v4: 100.65.0.0/16
+  v6: fd7a:115c:a1e2::/48
+  allocation: sequential
+
+derp:
+  server:
+    enabled: true
+    region_id: 1002
+    region_code: headscale-beta
+    region_name: Headscale Beta Embedded DERP
+    verify_clients: true
+    stun_listen_addr: 0.0.0.0:3478
+    private_key_path: /var/lib/headscale/derp_server_private.key
+    automatically_add_embedded_derp_region: true
+  urls: []
+  paths: []
+  auto_update_enabled: false
+  update_frequency: 3h
+
+disable_check_updates: true
+
+node:
+  expiry: 0
+  ephemeral:
+    inactivity_timeout: 30m
+  routes:
+    ha:
+      probe_interval: 0s
+      probe_timeout: 1s
+
+database:
+  type: sqlite
+  debug: false
+  sqlite:
+    path: /var/lib/headscale/db.sqlite
+    write_ahead_log: true
+
+tls_cert_path: /var/lib/headscale/tls.crt
+tls_key_path: /var/lib/headscale/tls.key
+
+log:
+  level: info
+  format: text
+
+policy:
+  mode: file
+  path: /etc/headscale/policy.hujson
+
+dns:
+  magic_dns: true
+  base_domain: beta.e2e.internal
+  override_local_dns: false
+  nameservers:
+    global: []
+    split: {}
+  search_domains: []
+  extra_records: []
+
+unix_socket: /var/run/headscale/headscale.sock
+unix_socket_permission: "0777"
+logtail:
+  enabled: false
+taildrop:
+  enabled: false

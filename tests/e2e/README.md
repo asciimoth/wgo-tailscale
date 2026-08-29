@@ -124,6 +124,40 @@ Expected result:
 - `curl` in the official Tailscale client container receives
   `hello from mixed-wgo`.
 
+## Multi-Headscale shared device
+
+Test setup:
+
+- Services: `headscale-alpha`, `headscale-beta`, `multi-a`, `multi-b`,
+  `multi-c`, two registrars, and verifier.
+- `headscale-alpha` uses `100.64.0.0/16`; `headscale-beta` uses
+  `100.65.0.0/16`.
+- `multi-a` connects only to `headscale-alpha`.
+- `multi-b` connects only to `headscale-beta`.
+- `multi-c` starts two `wgo-tailscale` clients against the same wgo device.
+  Each client uses its own cache file and `TransportID`.
+- DERP is disabled so each edge must use a direct UDP path.
+
+Testing sequence:
+
+1. Each `wgo-tailscale` client writes one auth URL for its Headscale server.
+2. The matching registrar approves each auth URL.
+3. `multi-c` waits until both control servers are running and both peers are
+   installed in the same wgo device.
+4. `multi-a` exchanges one encrypted IPv4 UDP payload with `multi-c` through
+   `headscale-alpha`.
+5. `multi-b` exchanges one encrypted IPv4 UDP payload with `multi-c` through
+   `headscale-beta`.
+6. Each node checks that its peer path is `direct-udp`.
+
+Expected result:
+
+- `multi-c` receives traffic from both independent Headscale tailnets through
+  one wgo device.
+- `multi-a` and `multi-b` each receive the expected `multi-c` payload.
+- The two controllers keep separate transports and do not remove or overwrite
+  each other's peers.
+
 ## Hosted service registration
 
 This Go test compiles with the regular suite but skips unless

@@ -17,7 +17,7 @@ command -v docker >/dev/null 2>&1 || skip "docker is not installed"
 docker compose version >/dev/null 2>&1 || skip "docker compose is unavailable"
 docker info >/dev/null 2>&1 || skip "docker daemon is unavailable or permission was denied"
 
-mkdir -p "$state/headscale" "$state/run"
+mkdir -p "$state/headscale" "$state/headscale-alpha" "$state/headscale-beta" "$state/run" "$state/run-alpha" "$state/run-beta"
 # Identity caches and Headscale's database intentionally survive between runs,
 # but outcome and interaction markers must describe this run only.
 rm -f \
@@ -25,15 +25,20 @@ rm -f \
 	"$state/stun-a.success" "$state/stun-b.success" \
 	"$state/local-a.success" "$state/local-b.success" \
 	"$state/mixed-wgo.success" "$state/mixed-official.success" \
+	"$state/multi-a.success" "$state/multi-b.success" "$state/multi-c.success" \
 	"$state/derp-a.addr" "$state/derp-b.addr" \
 	"$state/stun-a.addr" "$state/stun-b.addr" \
 	"$state/local-a.addr" "$state/local-b.addr" \
 	"$state/mixed-wgo.addr" "$state/mixed-official.addr" \
+	"$state/multi-a-alpha.addr" "$state/multi-c-alpha.addr" \
+	"$state/multi-b-beta.addr" "$state/multi-c-beta.addr" \
 	"$state/derp-a.auth" "$state/derp-b.auth" \
 	"$state/stun-a.auth" "$state/stun-b.auth" \
 	"$state/local-a.auth" "$state/local-b.auth" \
 	"$state/mixed-wgo.auth" "$state/mixed-official.authkey" \
-	"$state/registrar.success"
+	"$state/multi-a-alpha.auth" "$state/multi-c-alpha.auth" \
+	"$state/multi-b-beta.auth" "$state/multi-c-beta.auth" \
+	"$state/registrar.success" "$state/registrar-alpha.success" "$state/registrar-beta.success"
 
 cleanup() {
 	docker compose --ansi never --progress plain -f "$compose" down --remove-orphans >/dev/null 2>&1 || true
@@ -47,7 +52,10 @@ docker compose --ansi never --progress plain -f "$compose" run --rm --build cert
 docker compose --ansi never --progress plain -f "$compose" up \
 	--build \
 	--detach \
-	headscale registrar derp-a derp-b stun-a stun-b local-a local-b mixed-wgo mixed-official
+	headscale headscale-alpha headscale-beta \
+	registrar registrar-alpha registrar-beta \
+	derp-a derp-b stun-a stun-b local-a local-b mixed-wgo mixed-official \
+	multi-a multi-b multi-c
 
 docker compose --ansi never --progress plain -f "$compose" run \
 	--rm \

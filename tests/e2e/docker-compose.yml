@@ -6,17 +6,19 @@ services:
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
-        mkdir -p /var/lib/headscale
-        if [ ! -s /var/lib/headscale/tls.crt ]; then
-          openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
-            -subj /CN=headscale \
-            -addext subjectAltName=DNS:headscale \
-            -keyout /var/lib/headscale/tls.key \
-            -out /var/lib/headscale/tls.crt
-        fi
-        chmod 600 /var/lib/headscale/tls.key
+        for name in headscale headscale-alpha headscale-beta; do
+          mkdir -p "/state/$$name"
+          if [ ! -s "/state/$$name/tls.crt" ]; then
+            openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+              -subj "/CN=$$name" \
+              -addext "subjectAltName=DNS:$$name" \
+              -keyout "/state/$$name/tls.key" \
+              -out "/state/$$name/tls.crt"
+          fi
+          chmod 600 "/state/$$name/tls.key"
+        done
     volumes:
-      - ./.state/headscale:/var/lib/headscale
+      - ./.state:/state
 
   headscale:
     image: headscale/headscale:v0.29.3
@@ -29,6 +31,24 @@ services:
     ports:
       - "18443:8443"
       - "13478:3478/udp"
+
+  headscale-alpha:
+    image: headscale/headscale:v0.29.3
+    command: serve
+    volumes:
+      - ./headscale/config-alpha.yaml:/etc/headscale/config.yaml:ro
+      - ./headscale/policy.hujson:/etc/headscale/policy.hujson:ro
+      - ./.state/headscale-alpha:/var/lib/headscale
+      - ./.state/run-alpha:/var/run/headscale
+
+  headscale-beta:
+    image: headscale/headscale:v0.29.3
+    command: serve
+    volumes:
+      - ./headscale/config-beta.yaml:/etc/headscale/config.yaml:ro
+      - ./headscale/policy.hujson:/etc/headscale/policy.hujson:ro
+      - ./.state/headscale-beta:/var/lib/headscale
+      - ./.state/run-beta:/var/run/headscale
 
   registrar:
     build:
@@ -46,6 +66,42 @@ services:
       - ./headscale/register.sh:/scripts/register.sh:ro
       - ./.state/headscale:/var/lib/headscale
       - ./.state/run:/var/run/headscale
+      - ./.state:/state
+
+  registrar-alpha:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile
+    entrypoint: ["/bin/sh", "/scripts/register.sh"]
+    depends_on:
+      headscale-alpha:
+        condition: service_started
+    environment:
+      TEST_NODES: multi-a-alpha multi-c-alpha
+      REGISTRAR_SUCCESS: registrar-alpha.success
+    volumes:
+      - ./headscale/config-alpha.yaml:/etc/headscale/config.yaml:ro
+      - ./headscale/register.sh:/scripts/register.sh:ro
+      - ./.state/headscale-alpha:/var/lib/headscale
+      - ./.state/run-alpha:/var/run/headscale
+      - ./.state:/state
+
+  registrar-beta:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile
+    entrypoint: ["/bin/sh", "/scripts/register.sh"]
+    depends_on:
+      headscale-beta:
+        condition: service_started
+    environment:
+      TEST_NODES: multi-b-beta multi-c-beta
+      REGISTRAR_SUCCESS: registrar-beta.success
+    volumes:
+      - ./headscale/config-beta.yaml:/etc/headscale/config.yaml:ro
+      - ./headscale/register.sh:/scripts/register.sh:ro
+      - ./.state/headscale-beta:/var/lib/headscale
+      - ./.state/run-beta:/var/run/headscale
       - ./.state:/state
 
   derp-a:
@@ -217,6 +273,68 @@ services:
       - ./.state:/state
       - ./tailscale-client/run.sh:/scripts/run.sh:ro
 
+  multi-a:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile
+    entrypoint: ["/usr/local/bin/e2e-multi-node"]
+    depends_on:
+      headscale-alpha:
+        condition: service_started
+    environment:
+      NODE_NAME: multi-a
+      NODE_PRIVATE_HEX: "1212121212121212121212121212121212121212121212121212121212121212"
+      CONTROLLERS: alpha,https://headscale-alpha:8443,tailscale-alpha
+      PEERS: alpha,multi-c,1414141414141414141414141414141414141414141414141414141414141414
+      INSECURE_TLS: "1"
+      DISABLE_DERP: "1"
+      EXPECT_PATH: direct-udp
+      STATE_DIR: /state
+    volumes:
+      - ./.state:/state
+
+  multi-b:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile
+    entrypoint: ["/usr/local/bin/e2e-multi-node"]
+    depends_on:
+      headscale-beta:
+        condition: service_started
+    environment:
+      NODE_NAME: multi-b
+      NODE_PRIVATE_HEX: "1313131313131313131313131313131313131313131313131313131313131313"
+      CONTROLLERS: beta,https://headscale-beta:8443,tailscale-beta
+      PEERS: beta,multi-c,1414141414141414141414141414141414141414141414141414141414141414
+      INSECURE_TLS: "1"
+      DISABLE_DERP: "1"
+      EXPECT_PATH: direct-udp
+      STATE_DIR: /state
+    volumes:
+      - ./.state:/state
+
+  multi-c:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile
+    entrypoint: ["/usr/local/bin/e2e-multi-node"]
+    depends_on:
+      headscale-alpha:
+        condition: service_started
+      headscale-beta:
+        condition: service_started
+    environment:
+      NODE_NAME: multi-c
+      NODE_PRIVATE_HEX: "1414141414141414141414141414141414141414141414141414141414141414"
+      CONTROLLERS: alpha,https://headscale-alpha:8443,tailscale-alpha beta,https://headscale-beta:8443,tailscale-beta
+      PEERS: alpha,multi-a,1212121212121212121212121212121212121212121212121212121212121212 beta,multi-b,1313131313131313131313131313131313131313131313131313131313131313
+      INSECURE_TLS: "1"
+      DISABLE_DERP: "1"
+      EXPECT_PATH: direct-udp
+      STATE_DIR: /state
+    volumes:
+      - ./.state:/state
+
   verifier:
     build:
       context: ../..
@@ -230,8 +348,9 @@ services:
             [ -s /state/derp-a.success ] && [ -s /state/derp-b.success ] && \
             [ -s /state/stun-a.success ] && [ -s /state/stun-b.success ] && \
             [ -s /state/local-a.success ] && [ -s /state/local-b.success ] && \
-            [ -s /state/mixed-wgo.success ] && [ -s /state/mixed-official.success ]; then
-            echo "Headscale registration, narrowed wgo traffic, and official client curl passed"
+            [ -s /state/mixed-wgo.success ] && [ -s /state/mixed-official.success ] && \
+            [ -s /state/multi-a.success ] && [ -s /state/multi-b.success ] && [ -s /state/multi-c.success ]; then
+            echo "Headscale registration, narrowed wgo traffic, official client curl, and multi-Headscale traffic passed"
             exit 0
           fi
           remaining=$$((remaining - 1))
@@ -242,6 +361,10 @@ services:
         exit 1
     depends_on:
       registrar:
+        condition: service_started
+      registrar-alpha:
+        condition: service_started
+      registrar-beta:
         condition: service_started
       derp-a:
         condition: service_started
@@ -258,6 +381,12 @@ services:
       mixed-wgo:
         condition: service_started
       mixed-official:
+        condition: service_started
+      multi-a:
+        condition: service_started
+      multi-b:
+        condition: service_started
+      multi-c:
         condition: service_started
     volumes:
       - ./.state:/state
