@@ -96,6 +96,28 @@ Expected result:
 - Both nodes report `direct-udp`, which proves local peer discovery can create a
   usable direct path without DERP.
 
+## AmneziaWG obfuscation
+
+Test setup:
+
+- Services: `amnezia-a`, `amnezia-b`, Headscale, registrar, verifier.
+- Both nodes use deterministic wgo node keys and native `gonnect.Network`.
+- Both nodes enable the same non-default AmneziaWG obfuscation profile.
+- `DISABLE_DERP=1` prevents fallback through DERP.
+
+Testing sequence:
+
+1. Each node starts and is approved by the registrar.
+2. Each node installs its peer with the e2e AmneziaWG profile.
+3. Each node exchanges one encrypted IPv4 UDP payload through the in-memory TUN.
+4. Each node checks that the peer path is `direct-udp`.
+
+Expected result:
+
+- Both nodes receive the expected peer payload.
+- Both nodes report `direct-udp`, which proves Docker e2e traffic succeeds when
+  wgo peers use matching AmneziaWG packet obfuscation.
+
 ## Official client curl
 
 Test setup:

@@ -64,10 +64,19 @@ func run() error {
 	}
 	disableDiscovery := envBool("DISABLE_DISCOVERY") || envBool("FORCE_DERP")
 	disableDERP := envBool("DISABLE_DERP")
+	var obfuscation *device.AmneziaWGConfig
+	if envBool("AMNEZIAWG_OBFUSCATION") {
+		profile, err := e2eAmneziaWGConfig()
+		if err != nil {
+			return err
+		}
+		obfuscation = &profile
+	}
 	client, err := tailscale.New(gonnect.NativeConfig{}.Build(), dev, tailscale.Options{
 		ControlURL: requiredEnv("CONTROL_URL"), Hostname: name,
 		TLSConfig: tlsConfig, Cache: diskCache(filepath.Join(stateDir, name+".cache.json")),
 		DisableDiscovery: disableDiscovery, DisableDERP: disableDERP,
+		Obfuscation: obfuscation,
 	})
 	if err != nil {
 		return err
@@ -193,6 +202,31 @@ func envDefault(name, fallback string) string {
 func envBool(name string) bool {
 	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
 	return value == "1" || value == "true" || value == "yes"
+}
+
+func e2eAmneziaWGConfig() (device.AmneziaWGConfig, error) {
+	headerKey, err := device.ParseAmneziaWGHeaderProtectionKeyHex(
+		"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+	)
+	if err != nil {
+		return device.AmneziaWGConfig{}, fmt.Errorf("parse AmneziaWG header key: %w", err)
+	}
+	profile := device.DefaultAmneziaWGConfig()
+	profile.Version = device.AmneziaWGV3_1
+	profile.JunkCount = 2
+	profile.JunkMin = 8
+	profile.JunkMax = 32
+	profile.InitHeader = device.AmneziaWGHeaderRange{Start: 1001, End: 1001}
+	profile.ResponseHeader = device.AmneziaWGHeaderRange{Start: 1002, End: 1002}
+	profile.CookieHeader = device.AmneziaWGHeaderRange{Start: 1003, End: 1003}
+	profile.TransportHeader = device.AmneziaWGHeaderRange{Start: 1004, End: 1004}
+	profile.InitPadding = 12
+	profile.ResponsePadding = 12
+	profile.CookiePadding = 12
+	profile.TransportPadding = 12
+	profile.HeaderProtectionKey = headerKey
+	profile.ContentPadding = device.AmneziaWGRange{Min: 16, Max: 32, Set: true}
+	return profile, nil
 }
 
 func firstIPv4(prefixes []netip.Prefix) netip.Addr {

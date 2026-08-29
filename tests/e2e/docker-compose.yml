@@ -59,7 +59,7 @@ services:
       headscale:
         condition: service_started
     environment:
-      TEST_NODES: derp-a derp-b stun-a stun-b local-a local-b mixed-wgo
+      TEST_NODES: derp-a derp-b stun-a stun-b local-a local-b amnezia-a amnezia-b mixed-wgo
       PREAUTHKEY_NODES: mixed-official
     volumes:
       - ./headscale/config.yaml:/etc/headscale/config.yaml:ro
@@ -234,6 +234,50 @@ services:
     volumes:
       - ./.state:/state
 
+  amnezia-a:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile
+    depends_on:
+      headscale:
+        condition: service_started
+    environment:
+      SCENARIO_ID: amnezia-obfuscation
+      NODE_NAME: amnezia-a
+      OTHER_NODE: amnezia-b
+      NODE_PRIVATE_HEX: "1515151515151515151515151515151515151515151515151515151515151515"
+      OTHER_NODE_PRIVATE_HEX: "1616161616161616161616161616161616161616161616161616161616161616"
+      CONTROL_URL: https://headscale:8443
+      INSECURE_TLS: "1"
+      DISABLE_DERP: "1"
+      AMNEZIAWG_OBFUSCATION: "1"
+      EXPECT_PATH: direct-udp
+      STATE_DIR: /state
+    volumes:
+      - ./.state:/state
+
+  amnezia-b:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile
+    depends_on:
+      headscale:
+        condition: service_started
+    environment:
+      SCENARIO_ID: amnezia-obfuscation
+      NODE_NAME: amnezia-b
+      OTHER_NODE: amnezia-a
+      NODE_PRIVATE_HEX: "1616161616161616161616161616161616161616161616161616161616161616"
+      OTHER_NODE_PRIVATE_HEX: "1515151515151515151515151515151515151515151515151515151515151515"
+      CONTROL_URL: https://headscale:8443
+      INSECURE_TLS: "1"
+      DISABLE_DERP: "1"
+      AMNEZIAWG_OBFUSCATION: "1"
+      EXPECT_PATH: direct-udp
+      STATE_DIR: /state
+    volumes:
+      - ./.state:/state
+
   mixed-wgo:
     build:
       context: ../..
@@ -348,9 +392,10 @@ services:
             [ -s /state/derp-a.success ] && [ -s /state/derp-b.success ] && \
             [ -s /state/stun-a.success ] && [ -s /state/stun-b.success ] && \
             [ -s /state/local-a.success ] && [ -s /state/local-b.success ] && \
+            [ -s /state/amnezia-a.success ] && [ -s /state/amnezia-b.success ] && \
             [ -s /state/mixed-wgo.success ] && [ -s /state/mixed-official.success ] && \
             [ -s /state/multi-a.success ] && [ -s /state/multi-b.success ] && [ -s /state/multi-c.success ]; then
-            echo "Headscale registration, narrowed wgo traffic, official client curl, and multi-Headscale traffic passed"
+            echo "Headscale registration, narrowed wgo traffic, AmneziaWG traffic, official client curl, and multi-Headscale traffic passed"
             exit 0
           fi
           remaining=$$((remaining - 1))
@@ -377,6 +422,10 @@ services:
       local-a:
         condition: service_started
       local-b:
+        condition: service_started
+      amnezia-a:
+        condition: service_started
+      amnezia-b:
         condition: service_started
       mixed-wgo:
         condition: service_started
