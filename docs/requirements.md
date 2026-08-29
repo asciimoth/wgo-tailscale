@@ -22,7 +22,7 @@ configuration.
 | Optional peer confirmation | Implemented | awaiting peers remain visible but outside both wgo and the tailnet bind until `ConfirmPeer`; revocation withdraws them | confirmation/network/cache tests |
 | Optional AmneziaWG | Implemented | validated profile copied to every peer owned by this client | obfuscation ownership test |
 | Optional persistence | Implemented | versioned callback blob for machine/DISCO identity, node-key fingerprint, backend ID, and confirmations; writes serialized | cache identity/round-trip/concurrency tests |
-| Headscale E2E | Implemented | two wgo processes, registration links, mock approval, peer setup, bidirectional encrypted traffic through forced DERP | `tests/e2e/run.sh` |
+| Headscale E2E | Implemented | narrowed Docker cases for forced TLS DERP, STUN discovery metadata plus direct UDP, and local endpoint direct discovery; each case uses two wgo processes, registration links, mock approval, peer setup, and bidirectional encrypted traffic | `tests/e2e/run.sh`; `tests/e2e/README.md` |
 | Hosted-service opt-in | Implemented | gitignored JSON inputs and cache, automatic skip, printed authorization URL | `TestRealTailscaleService` |
 
 ## Deliberate limits

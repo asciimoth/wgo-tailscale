@@ -21,9 +21,18 @@ mkdir -p "$state/headscale" "$state/run"
 # Identity caches and Headscale's database intentionally survive between runs,
 # but outcome and interaction markers must describe this run only.
 rm -f \
-	"$state/node-a.success" "$state/node-b.success" \
-	"$state/node-a.addr" "$state/node-b.addr" \
-	"$state/node-a.auth" "$state/node-b.auth" \
+	"$state/derp-a.success" "$state/derp-b.success" \
+	"$state/stun-a.success" "$state/stun-b.success" \
+	"$state/local-a.success" "$state/local-b.success" \
+	"$state/mixed-wgo.success" "$state/mixed-official.success" \
+	"$state/derp-a.addr" "$state/derp-b.addr" \
+	"$state/stun-a.addr" "$state/stun-b.addr" \
+	"$state/local-a.addr" "$state/local-b.addr" \
+	"$state/mixed-wgo.addr" "$state/mixed-official.addr" \
+	"$state/derp-a.auth" "$state/derp-b.auth" \
+	"$state/stun-a.auth" "$state/stun-b.auth" \
+	"$state/local-a.auth" "$state/local-b.auth" \
+	"$state/mixed-wgo.auth" "$state/mixed-official.authkey" \
 	"$state/registrar.success"
 
 cleanup() {
@@ -38,7 +47,7 @@ docker compose --ansi never --progress plain -f "$compose" run --rm --build cert
 docker compose --ansi never --progress plain -f "$compose" up \
 	--build \
 	--detach \
-	headscale registrar node-a node-b
+	headscale registrar derp-a derp-b stun-a stun-b local-a local-b mixed-wgo mixed-official
 
 docker compose --ansi never --progress plain -f "$compose" run \
 	--rm \

@@ -33,6 +33,7 @@ func main() {
 func run() error {
 	name := requiredEnv("NODE_NAME")
 	other := requiredEnv("OTHER_NODE")
+	scenario := envDefault("SCENARIO_ID", name)
 	stateDir := envDefault("STATE_DIR", "/state")
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -46,6 +47,14 @@ func run() error {
 	if err := private.FromHex(requiredEnv("NODE_PRIVATE_HEX")); err != nil {
 		return fmt.Errorf("node private key: %w", err)
 	}
+	otherPublic := device.NoisePublicKey{}
+	if raw := os.Getenv("OTHER_NODE_PRIVATE_HEX"); raw != "" {
+		var otherPrivate device.NoisePrivateKey
+		if err := otherPrivate.FromHex(raw); err != nil {
+			return fmt.Errorf("other node private key: %w", err)
+		}
+		otherPublic = otherPrivate.PublicKey()
+	}
 	if err := dev.SetPrivateKey(private); err != nil {
 		return err
 	}
@@ -53,11 +62,12 @@ func run() error {
 	if os.Getenv("INSECURE_TLS") == "1" {
 		tlsConfig.InsecureSkipVerify = true // test-only self-signed Headscale
 	}
-	forceDERP := os.Getenv("FORCE_DERP") == "1"
+	disableDiscovery := envBool("DISABLE_DISCOVERY") || envBool("FORCE_DERP")
+	disableDERP := envBool("DISABLE_DERP")
 	client, err := tailscale.New(gonnect.NativeConfig{}.Build(), dev, tailscale.Options{
 		ControlURL: requiredEnv("CONTROL_URL"), Hostname: name,
 		TLSConfig: tlsConfig, Cache: diskCache(filepath.Join(stateDir, name+".cache.json")),
-		DisableDiscovery: forceDERP,
+		DisableDiscovery: disableDiscovery, DisableDERP: disableDERP,
 	})
 	if err != nil {
 		return err
@@ -90,11 +100,20 @@ func run() error {
 				_ = atomicWrite(filepath.Join(stateDir, name+".addr"), []byte(ownAddress.String()+"\n"))
 			}
 		}
-		for _, peer := range snapshot.Peers {
-			if peer.AppliedToWGO {
-				peerAddress = firstIPv4(peer.Node.Addresses)
-				if peerAddress.IsValid() {
+		if !otherPublic.IsZero() {
+			for _, peer := range snapshot.Peers {
+				if peer.Node.PublicKey == otherPublic && peer.AppliedToWGO {
+					peerAddress = firstIPv4(peer.Node.Addresses)
 					break
+				}
+			}
+		} else {
+			for _, peer := range snapshot.Peers {
+				if peer.AppliedToWGO {
+					peerAddress = firstIPv4(peer.Node.Addresses)
+					if peerAddress.IsValid() {
+						break
+					}
 				}
 			}
 		}
@@ -102,6 +121,16 @@ func run() error {
 		case <-ctx.Done():
 			return fmt.Errorf("%s waiting for map: %w (snapshot=%#v)", name, ctx.Err(), snapshot)
 		case <-ticker.C:
+		}
+	}
+	if want := os.Getenv("REQUIRE_ENDPOINT_SOURCE"); want != "" {
+		if err := waitForLocalEndpointSource(ctx, client, want); err != nil {
+			return fmt.Errorf("%s %s endpoint source: %w", scenario, name, err)
+		}
+	}
+	if envBool("REQUIRE_DERP_STUN_NODE") {
+		if err := waitForDERPSTUNNode(ctx, client); err != nil {
+			return fmt.Errorf("%s %s DERP STUN node: %w", scenario, name, err)
 		}
 	}
 	for {
@@ -130,27 +159,15 @@ func run() error {
 	case <-ctx.Done():
 		return fmt.Errorf("%s waiting for tunnel traffic: %w", name, ctx.Err())
 	}
-	if forceDERP {
-		pathDeadline := time.NewTimer(3 * time.Second)
-		defer pathDeadline.Stop()
-		pathTicker := time.NewTicker(20 * time.Millisecond)
-		defer pathTicker.Stop()
-		for !slices.ContainsFunc(client.Peers(), func(peer tailscale.PeerInfo) bool {
-			return peer.AppliedToWGO && firstIPv4(peer.Node.Addresses) == peerAddress && peer.Path == tailscale.PathDERP
-		}) {
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("%s waiting for DERP path state: %w", name, ctx.Err())
-			case <-pathDeadline.C:
-				return fmt.Errorf("%s tunnel traffic did not use DERP: peers=%#v", name, client.Peers())
-			case <-pathTicker.C:
-			}
+	if want := os.Getenv("EXPECT_PATH"); want != "" {
+		if err := waitForPeerPath(ctx, client, peerAddress, tailscale.PathKind(want)); err != nil {
+			return fmt.Errorf("%s %s peer path: %w", scenario, name, err)
 		}
 	}
 	if err := atomicWrite(filepath.Join(stateDir, name+".success"), []byte("ok\n")); err != nil {
 		return err
 	}
-	fmt.Printf("%s: bidirectional encrypted tunnel traffic passed\n", name)
+	fmt.Printf("%s: %s bidirectional encrypted tunnel traffic passed\n", scenario, name)
 	// Keep the client alive until the verifier ends the Compose run. With
 	// --abort-on-container-exit an early successful node exit would otherwise
 	// stop its peer before the verifier observes both markers.
@@ -173,6 +190,11 @@ func envDefault(name, fallback string) string {
 	return fallback
 }
 
+func envBool(name string) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	return value == "1" || value == "true" || value == "yes"
+}
+
 func firstIPv4(prefixes []netip.Prefix) netip.Addr {
 	for _, prefix := range prefixes {
 		if prefix.Addr().Is4() {
@@ -180,6 +202,63 @@ func firstIPv4(prefixes []netip.Prefix) netip.Addr {
 		}
 	}
 	return netip.Addr{}
+}
+
+func waitForLocalEndpointSource(ctx context.Context, client *tailscale.Client, want string) error {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		snapshot := client.Snapshot()
+		if slices.ContainsFunc(snapshot.LocalEndpoints, func(endpoint tailscale.LocalEndpoint) bool {
+			return endpoint.Source == want
+		}) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%w; local endpoints=%#v", ctx.Err(), snapshot.LocalEndpoints)
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForDERPSTUNNode(ctx context.Context, client *tailscale.Client) error {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		snapshot := client.Snapshot()
+		for _, region := range snapshot.DERP.Regions {
+			for _, node := range region.Nodes {
+				if node.STUNPort > 0 {
+					return nil
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%w; DERP regions=%#v", ctx.Err(), snapshot.DERP.Regions)
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForPeerPath(ctx context.Context, client *tailscale.Client, peerAddress netip.Addr, want tailscale.PathKind) error {
+	pathDeadline := time.NewTimer(3 * time.Second)
+	defer pathDeadline.Stop()
+	pathTicker := time.NewTicker(20 * time.Millisecond)
+	defer pathTicker.Stop()
+	for !slices.ContainsFunc(client.Peers(), func(peer tailscale.PeerInfo) bool {
+		return peer.AppliedToWGO && firstIPv4(peer.Node.Addresses) == peerAddress && peer.Path == want
+	}) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-pathDeadline.C:
+			return fmt.Errorf("wanted %s, got peers=%#v", want, client.Peers())
+		case <-pathTicker.C:
+		}
+	}
+	return nil
 }
 
 func diskCache(path string) tailscale.CacheCallbacks {

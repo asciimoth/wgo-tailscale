@@ -38,6 +38,9 @@ services:
     depends_on:
       headscale:
         condition: service_started
+    environment:
+      TEST_NODES: derp-a derp-b stun-a stun-b local-a local-b mixed-wgo
+      PREAUTHKEY_NODES: mixed-official
     volumes:
       - ./headscale/config.yaml:/etc/headscale/config.yaml:ro
       - ./headscale/register.sh:/scripts/register.sh:ro
@@ -45,7 +48,7 @@ services:
       - ./.state/run:/var/run/headscale
       - ./.state:/state
 
-  node-a:
+  derp-a:
     build:
       context: ../..
       dockerfile: tests/e2e/Dockerfile
@@ -53,17 +56,20 @@ services:
       headscale:
         condition: service_started
     environment:
-      NODE_NAME: node-a
-      OTHER_NODE: node-b
-      NODE_PRIVATE_HEX: "1111111111111111111111111111111111111111111111111111111111111111"
+      SCENARIO_ID: derp-tunnel
+      NODE_NAME: derp-a
+      OTHER_NODE: derp-b
+      NODE_PRIVATE_HEX: "7777777777777777777777777777777777777777777777777777777777777777"
+      OTHER_NODE_PRIVATE_HEX: "8888888888888888888888888888888888888888888888888888888888888888"
       CONTROL_URL: https://headscale:8443
       INSECURE_TLS: "1"
-      FORCE_DERP: "1"
+      DISABLE_DISCOVERY: "1"
+      EXPECT_PATH: derp-tls
       STATE_DIR: /state
     volumes:
       - ./.state:/state
 
-  node-b:
+  derp-b:
     build:
       context: ../..
       dockerfile: tests/e2e/Dockerfile
@@ -71,15 +77,145 @@ services:
       headscale:
         condition: service_started
     environment:
-      NODE_NAME: node-b
-      OTHER_NODE: node-a
-      NODE_PRIVATE_HEX: "2222222222222222222222222222222222222222222222222222222222222222"
+      SCENARIO_ID: derp-tunnel
+      NODE_NAME: derp-b
+      OTHER_NODE: derp-a
+      NODE_PRIVATE_HEX: "8888888888888888888888888888888888888888888888888888888888888888"
+      OTHER_NODE_PRIVATE_HEX: "7777777777777777777777777777777777777777777777777777777777777777"
       CONTROL_URL: https://headscale:8443
       INSECURE_TLS: "1"
-      FORCE_DERP: "1"
+      DISABLE_DISCOVERY: "1"
+      EXPECT_PATH: derp-tls
       STATE_DIR: /state
     volumes:
       - ./.state:/state
+
+  stun-a:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile
+    depends_on:
+      headscale:
+        condition: service_started
+    environment:
+      SCENARIO_ID: stun-nat
+      NODE_NAME: stun-a
+      OTHER_NODE: stun-b
+      NODE_PRIVATE_HEX: "3333333333333333333333333333333333333333333333333333333333333333"
+      OTHER_NODE_PRIVATE_HEX: "4444444444444444444444444444444444444444444444444444444444444444"
+      CONTROL_URL: https://headscale:8443
+      INSECURE_TLS: "1"
+      DISABLE_DERP: "1"
+      EXPECT_PATH: direct-udp
+      REQUIRE_DERP_STUN_NODE: "1"
+      STATE_DIR: /state
+    volumes:
+      - ./.state:/state
+
+  stun-b:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile
+    depends_on:
+      headscale:
+        condition: service_started
+    environment:
+      SCENARIO_ID: stun-nat
+      NODE_NAME: stun-b
+      OTHER_NODE: stun-a
+      NODE_PRIVATE_HEX: "4444444444444444444444444444444444444444444444444444444444444444"
+      OTHER_NODE_PRIVATE_HEX: "3333333333333333333333333333333333333333333333333333333333333333"
+      CONTROL_URL: https://headscale:8443
+      INSECURE_TLS: "1"
+      DISABLE_DERP: "1"
+      EXPECT_PATH: direct-udp
+      REQUIRE_DERP_STUN_NODE: "1"
+      STATE_DIR: /state
+    volumes:
+      - ./.state:/state
+
+  local-a:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile
+    depends_on:
+      headscale:
+        condition: service_started
+    environment:
+      SCENARIO_ID: local-discovery
+      NODE_NAME: local-a
+      OTHER_NODE: local-b
+      NODE_PRIVATE_HEX: "5555555555555555555555555555555555555555555555555555555555555555"
+      OTHER_NODE_PRIVATE_HEX: "6666666666666666666666666666666666666666666666666666666666666666"
+      CONTROL_URL: https://headscale:8443
+      INSECURE_TLS: "1"
+      DISABLE_DERP: "1"
+      EXPECT_PATH: direct-udp
+      REQUIRE_ENDPOINT_SOURCE: local
+      STATE_DIR: /state
+    volumes:
+      - ./.state:/state
+
+  local-b:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile
+    depends_on:
+      headscale:
+        condition: service_started
+    environment:
+      SCENARIO_ID: local-discovery
+      NODE_NAME: local-b
+      OTHER_NODE: local-a
+      NODE_PRIVATE_HEX: "6666666666666666666666666666666666666666666666666666666666666666"
+      OTHER_NODE_PRIVATE_HEX: "5555555555555555555555555555555555555555555555555555555555555555"
+      CONTROL_URL: https://headscale:8443
+      INSECURE_TLS: "1"
+      DISABLE_DERP: "1"
+      EXPECT_PATH: direct-udp
+      REQUIRE_ENDPOINT_SOURCE: local
+      STATE_DIR: /state
+    volumes:
+      - ./.state:/state
+
+  mixed-wgo:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile
+    entrypoint: ["/usr/local/bin/e2e-vtun-server"]
+    depends_on:
+      headscale:
+        condition: service_started
+    environment:
+      NODE_NAME: mixed-wgo
+      OFFICIAL_NODE: mixed-official
+      NODE_PRIVATE_HEX: "9999999999999999999999999999999999999999999999999999999999999999"
+      CONTROL_URL: https://headscale:8443
+      INSECURE_TLS: "1"
+      STATE_DIR: /state
+    volumes:
+      - ./.state:/state
+
+  mixed-official:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile.tailscale
+    entrypoint: ["/bin/sh", "/scripts/run.sh"]
+    depends_on:
+      headscale:
+        condition: service_started
+      registrar:
+        condition: service_started
+      mixed-wgo:
+        condition: service_started
+    environment:
+      NODE_NAME: mixed-official
+      WGO_NODE: mixed-wgo
+      CONTROL_URL: https://headscale:8443
+      STATE_DIR: /state
+    volumes:
+      - ./.state:/state
+      - ./tailscale-client/run.sh:/scripts/run.sh:ro
 
   verifier:
     build:
@@ -90,8 +226,12 @@ services:
       - |
         remaining=180
         while [ "$$remaining" -gt 0 ]; do
-          if [ -s /state/node-a.success ] && [ -s /state/node-b.success ]; then
-            echo "Headscale registration and bidirectional wgo tunnel traffic passed"
+          if \
+            [ -s /state/derp-a.success ] && [ -s /state/derp-b.success ] && \
+            [ -s /state/stun-a.success ] && [ -s /state/stun-b.success ] && \
+            [ -s /state/local-a.success ] && [ -s /state/local-b.success ] && \
+            [ -s /state/mixed-wgo.success ] && [ -s /state/mixed-official.success ]; then
+            echo "Headscale registration, narrowed wgo traffic, and official client curl passed"
             exit 0
           fi
           remaining=$$((remaining - 1))
@@ -103,9 +243,21 @@ services:
     depends_on:
       registrar:
         condition: service_started
-      node-a:
+      derp-a:
         condition: service_started
-      node-b:
+      derp-b:
+        condition: service_started
+      stun-a:
+        condition: service_started
+      stun-b:
+        condition: service_started
+      local-a:
+        condition: service_started
+      local-b:
+        condition: service_started
+      mixed-wgo:
+        condition: service_started
+      mixed-official:
         condition: service_started
     volumes:
       - ./.state:/state
