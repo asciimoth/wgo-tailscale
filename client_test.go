@@ -2,6 +2,7 @@ package tailscale
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"net/netip"
@@ -92,11 +93,22 @@ func cloneTestSpec(spec device.PeerSpec) device.PeerSpec {
 func newUnitClient(t *testing.T, confirm bool) (*Client, *fakeDevice) {
 	t.Helper()
 	dev := newFakeDevice(t)
-	client, err := New(gonnect.NativeConfig{}.Build(), dev, Options{Hostname: "unit", ConfirmPeers: confirm})
+	client, err := New(gonnect.NativeConfig{}.Build(), dev, Options{Hostname: "unit", ConfirmPeers: confirm, TLSConfig: testTLSConfig()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return client, dev
+}
+
+func testTLSConfig() *tls.Config {
+	return &tls.Config{MinVersion: tls.VersionTLS12}
+}
+
+func TestNewRequiresTLSConfig(t *testing.T) {
+	_, err := New(gonnect.NativeConfig{}.Build(), newFakeDevice(t), Options{Hostname: "missing-tls"})
+	if err == nil || !strings.Contains(err.Error(), "TLSConfig is required") {
+		t.Fatalf("New() error = %v, want TLSConfig required", err)
+	}
 }
 
 func newControlNode(t *testing.T, id int64, stableID, name, address string) *controlproto.Node {
@@ -171,6 +183,7 @@ func TestConcurrentConfirmationsPersistNewestState(t *testing.T) {
 	var stored []byte
 	client, err := New(gonnect.NativeConfig{}.Build(), dev, Options{
 		Hostname: "cache-order", ConfirmPeers: true,
+		TLSConfig: testTLSConfig(),
 		Cache: CacheCallbacks{
 			Load: func(context.Context) ([]byte, error) { return nil, nil },
 			Store: func(_ context.Context, value []byte) error {
@@ -628,7 +641,9 @@ func TestClosePublishesDesiredNetworkDown(t *testing.T) {
 func TestStartUsesExistingWGOKey(t *testing.T) {
 	dev := newFakeDevice(t)
 	original := dev.PrivateKey()
-	client, err := New(gonnect.NativeConfig{}.Build(), dev, Options{Hostname: "identity", ControlURL: "http://127.0.0.1:1"})
+	client, err := New(gonnect.NativeConfig{}.Build(), dev, Options{
+		Hostname: "identity", ControlURL: "http://127.0.0.1:1", TLSConfig: testTLSConfig(),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -653,7 +668,7 @@ func TestStartUsesExistingWGOKey(t *testing.T) {
 func TestStartRejectsZeroNodeKey(t *testing.T) {
 	dev := newFakeDevice(t)
 	dev.private = device.NoisePrivateKey{}
-	client, err := New(gonnect.NativeConfig{}.Build(), dev, Options{Hostname: "zero"})
+	client, err := New(gonnect.NativeConfig{}.Build(), dev, Options{Hostname: "zero", TLSConfig: testTLSConfig()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -668,7 +683,9 @@ func TestObfuscationAppliedOnlyToOwnedPeers(t *testing.T) {
 	profile.JunkCount = 2
 	profile.JunkMin = 16
 	profile.JunkMax = 32
-	client, err := New(gonnect.NativeConfig{}.Build(), dev, Options{Hostname: "amnezia", Obfuscation: &profile})
+	client, err := New(gonnect.NativeConfig{}.Build(), dev, Options{
+		Hostname: "amnezia", Obfuscation: &profile, TLSConfig: testTLSConfig(),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

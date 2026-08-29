@@ -3,6 +3,7 @@ package tailnet
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -21,11 +22,16 @@ func (n *udpBlockedNetwork) ListenUDP(context.Context, string, string) (gonnect.
 	return nil, errors.New("UDP unavailable")
 }
 
+func testTLSConfig() *tls.Config {
+	return &tls.Config{MinVersion: tls.VersionTLS12}
+}
+
 func TestBindDirectDatagram(t *testing.T) {
 	newBind := func() *Bind {
 		bind, err := NewBind(Config{
 			Network: gonnect.NativeConfig{}.Build(), NodePrivate: mustPrivate(t),
-			DiscoPrivate: mustPrivate(t), DisableDERP: true, DisableDiscovery: true,
+			DiscoPrivate: mustPrivate(t), TLSConfig: testTLSConfig(),
+			DisableDERP: true, DisableDiscovery: true,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -75,7 +81,8 @@ func TestBindDirectDatagram(t *testing.T) {
 func TestBindCloseUnblocksAndAllowsReopen(t *testing.T) {
 	bind, err := NewBind(Config{
 		Network: gonnect.NativeConfig{}.Build(), NodePrivate: mustPrivate(t),
-		DiscoPrivate: mustPrivate(t), DisableDERP: true, DisableDiscovery: true,
+		DiscoPrivate: mustPrivate(t), TLSConfig: testTLSConfig(),
+		DisableDERP: true, DisableDiscovery: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +122,7 @@ func TestBindCanOpenInDERPOnlyModeWithoutUDP(t *testing.T) {
 	network := &udpBlockedNetwork{Network: gonnect.NativeConfig{}.Build()}
 	bind, err := NewBind(Config{
 		Network: network, NodePrivate: mustPrivate(t), DiscoPrivate: mustPrivate(t),
-		DisableDiscovery: true,
+		TLSConfig: testTLSConfig(), DisableDiscovery: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -149,7 +156,7 @@ func TestBindCanOpenInDERPOnlyModeWithoutUDP(t *testing.T) {
 
 	withoutDERP, err := NewBind(Config{
 		Network: network, NodePrivate: mustPrivate(t), DiscoPrivate: mustPrivate(t),
-		DisableDERP: true,
+		TLSConfig: testTLSConfig(), DisableDERP: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -164,7 +171,8 @@ func TestBindDERPFailureFallsBackToControlCandidate(t *testing.T) {
 	newBind := func() *Bind {
 		bind, err := NewBind(Config{
 			Network: gonnect.NativeConfig{}.Build(), NodePrivate: mustPrivate(t),
-			DiscoPrivate: mustPrivate(t), DisableDiscovery: true,
+			DiscoPrivate: mustPrivate(t), TLSConfig: testTLSConfig(),
+			DisableDiscovery: true,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -234,7 +242,8 @@ func TestBindDERPFailureFallsBackToControlCandidate(t *testing.T) {
 func TestPeerAddressesSurviveBindReopenWithoutStaleDirectPath(t *testing.T) {
 	bind, err := NewBind(Config{
 		Network: gonnect.NativeConfig{}.Build(), NodePrivate: mustPrivate(t),
-		DiscoPrivate: mustPrivate(t), DisableDERP: true, DisableDiscovery: true,
+		DiscoPrivate: mustPrivate(t), TLSConfig: testTLSConfig(),
+		DisableDERP: true, DisableDiscovery: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -284,7 +293,8 @@ func TestPeerAddressesSurviveBindReopenWithoutStaleDirectPath(t *testing.T) {
 func TestDERPPacketsRequireConfiguredPeer(t *testing.T) {
 	bind, err := NewBind(Config{
 		Network: gonnect.NativeConfig{}.Build(), NodePrivate: mustPrivate(t),
-		DiscoPrivate: mustPrivate(t), DisableDERP: true, DisableDiscovery: true,
+		DiscoPrivate: mustPrivate(t), TLSConfig: testTLSConfig(),
+		DisableDERP: true, DisableDiscovery: true,
 	})
 	if err != nil {
 		t.Fatal(err)

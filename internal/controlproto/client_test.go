@@ -2,6 +2,7 @@ package controlproto
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -149,7 +150,7 @@ func TestClientRegisterMapAndPingsOverNoise(t *testing.T) {
 	defer server.Close()
 
 	network := &countingNetwork{Network: gonnect.NativeConfig{}.Build()}
-	client, err := NewClient(network, server.URL, machine, nil)
+	client, err := NewClient(network, server.URL, machine, &tls.Config{MinVersion: tls.VersionTLS12})
 	if err != nil {
 		t.Fatal(err)
 	}

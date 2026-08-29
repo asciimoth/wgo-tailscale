@@ -70,9 +70,10 @@ func NewClient(network gonnect.Network, serverURL string, machineKey PrivateKey,
 	if machineKey.IsZero() {
 		return nil, errors.New("controlproto: zero machine key")
 	}
-	if tlsConfig != nil {
-		tlsConfig = tlsConfig.Clone()
+	if tlsConfig == nil {
+		return nil, errors.New("controlproto: nil TLS config")
 	}
+	tlsConfig = tlsConfig.Clone()
 	tr := &http.Transport{
 		DialContext: network.Dial,
 		// Leave ServerName empty unless the caller explicitly set it. The

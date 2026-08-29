@@ -151,21 +151,27 @@ func (c *Client) Start(parent context.Context) error {
 	if device.NoisePublicKey(nodePublic) != wgoPublic {
 		return errors.New("tailscale: invalid wgo node key")
 	}
+	c.cacheMu.Lock()
 	cache, _, err := loadOrCreateCache(parent, c.opts.Cache, [32]byte(nodePublic))
 	if err != nil {
+		c.cacheMu.Unlock()
 		return err
 	}
 	machineRaw, err := decodePrivateKey(cache.MachinePrivate)
 	if err != nil {
+		c.cacheMu.Unlock()
 		return err
 	}
 	discoRaw, err := decodePrivateKey(cache.DiscoPrivate)
 	if err != nil {
+		c.cacheMu.Unlock()
 		return err
 	}
 	if err := storeCache(parent, c.opts.Cache, cache); err != nil {
+		c.cacheMu.Unlock()
 		return err
 	}
+	c.cacheMu.Unlock()
 	machinePrivate := controlproto.PrivateKey(machineRaw)
 	discoPrivate := controlproto.PrivateKey(discoRaw)
 	control, err := controlproto.NewClient(c.network, c.opts.ControlURL, machinePrivate, c.opts.TLSConfig)

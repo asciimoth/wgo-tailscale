@@ -2,6 +2,7 @@ package e2e_test
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -69,7 +70,8 @@ func TestRealTailscaleService(t *testing.T) {
 	cache := fileCache(cachePath)
 	client, err := tailscale.New(gonnect.NativeConfig{}.Build(), dev, tailscale.Options{
 		ControlURL: config.ControlURL, Hostname: config.Hostname,
-		AuthKey: config.AuthKey, Cache: cache,
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+		AuthKey:   config.AuthKey, Cache: cache,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -113,11 +115,24 @@ func fileCache(path string) tailscale.CacheCallbacks {
 			return data, err
 		},
 		Store: func(_ context.Context, data []byte) error {
-			temporary := path + ".tmp"
-			if err := os.WriteFile(temporary, data, 0o600); err != nil {
+			dir := filepath.Dir(path)
+			if err := os.MkdirAll(dir, 0o700); err != nil {
 				return err
 			}
-			return os.Rename(temporary, path)
+			temporary, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
+			if err != nil {
+				return err
+			}
+			temporaryName := temporary.Name()
+			defer func() { _ = os.Remove(temporaryName) }()
+			if _, err := temporary.Write(data); err != nil {
+				_ = temporary.Close()
+				return err
+			}
+			if err := temporary.Close(); err != nil {
+				return err
+			}
+			return os.Rename(temporaryName, path)
 		},
 	}
 }

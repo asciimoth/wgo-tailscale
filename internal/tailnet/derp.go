@@ -82,9 +82,7 @@ type derpClient struct {
 
 func newDERPManager(network gonnect.Network, private controlproto.PrivateKey, tlsConfig *tls.Config, logger *slog.Logger, onPacket func(controlproto.NodePublic, []byte)) *derpManager {
 	ctx, cancel := context.WithCancel(context.Background())
-	if tlsConfig != nil {
-		tlsConfig = tlsConfig.Clone()
-	}
+	tlsConfig = tlsConfig.Clone()
 	return &derpManager{
 		network: network, nodePrivate: private, tlsConfig: tlsConfig,
 		logger: logger, onPacket: onPacket, ctx: ctx, cancel: cancel,

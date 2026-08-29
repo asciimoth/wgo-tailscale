@@ -135,12 +135,13 @@ func NewBind(cfg Config) (*Bind, error) {
 	if cfg.NodePrivate.IsZero() || cfg.DiscoPrivate.IsZero() {
 		return nil, errors.New("tailnet: zero identity key")
 	}
+	if cfg.TLSConfig == nil {
+		return nil, errors.New("tailnet: nil TLS config")
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.DiscardHandler)
 	}
-	if cfg.TLSConfig != nil {
-		cfg.TLSConfig = cfg.TLSConfig.Clone()
-	}
+	cfg.TLSConfig = cfg.TLSConfig.Clone()
 	b := &Bind{
 		cfg:         cfg,
 		peers:       make(map[controlproto.NodePublic]*peerState),

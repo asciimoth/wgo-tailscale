@@ -49,9 +49,9 @@ func run() error {
 	if err := dev.SetPrivateKey(private); err != nil {
 		return err
 	}
-	tlsConfig := (*tls.Config)(nil)
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 	if os.Getenv("INSECURE_TLS") == "1" {
-		tlsConfig = &tls.Config{InsecureSkipVerify: true} // test-only self-signed Headscale
+		tlsConfig.InsecureSkipVerify = true // test-only self-signed Headscale
 	}
 	forceDERP := os.Getenv("FORCE_DERP") == "1"
 	client, err := tailscale.New(gonnect.NativeConfig{}.Build(), dev, tailscale.Options{

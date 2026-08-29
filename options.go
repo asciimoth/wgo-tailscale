@@ -84,7 +84,8 @@ type Options struct {
 	// path and other peers use them if DERP is unavailable.
 	DisableDiscovery bool
 
-	// TLSConfig customizes TLS to control and DERP. It is cloned before use.
+	// TLSConfig configures all outgoing TLS connections. It is required and is
+	// cloned before use.
 	TLSConfig *tls.Config
 	// Cache is optional. Without it a new machine/discovery identity is made on
 	// each process run, while the wgo node identity remains unchanged.
@@ -137,9 +138,10 @@ func (o Options) withDefaults() (Options, error) {
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.DiscardHandler)
 	}
-	if o.TLSConfig != nil {
-		o.TLSConfig = o.TLSConfig.Clone()
+	if o.TLSConfig == nil {
+		return Options{}, errors.New("tailscale: TLSConfig is required")
 	}
+	o.TLSConfig = o.TLSConfig.Clone()
 	if o.Obfuscation != nil {
 		cfg := *o.Obfuscation
 		o.Obfuscation = &cfg

@@ -48,6 +48,7 @@ network := (&gonnect.NativeConfig{}).Build()
 client, err := tailscale.New(network, dev, tailscale.Options{
     Hostname:    "my-vpn-node",
     ControlURL: tailscale.DefaultControlURL,
+    TLSConfig:  &tls.Config{MinVersion: tls.VersionTLS12},
     ConfirmPeers: true,
 })
 if err != nil {

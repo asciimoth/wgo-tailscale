@@ -11,6 +11,7 @@ not covered here.
 client, err := tailscale.New(network, dev, tailscale.Options{
     Hostname:   "laptop",
     ControlURL: tailscale.DefaultControlURL, // or a Headscale URL
+    TLSConfig:  &tls.Config{MinVersion: tls.VersionTLS12},
     AuthKey:    os.Getenv("TS_AUTHKEY"),      // optional
 
     // New control-plane peers remain visible but are not sent to wgo until
@@ -103,6 +104,7 @@ if err != nil { return err }
 tailscaleClient, err := tailscale.New(network, dev, tailscale.Options{
     Hostname:    "combined-node",
     TransportID: "tailscale", // not the default or the other controller's ID
+    TLSConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
 })
 if err != nil { return err }
 
@@ -205,6 +207,7 @@ profile := device.DefaultAmneziaWGConfig()
 client, err := tailscale.New(network, dev, tailscale.Options{
     Hostname:    "obfuscated-node",
     Obfuscation: &profile,
+    TLSConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
 })
 ```
 

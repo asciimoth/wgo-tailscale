@@ -283,9 +283,9 @@ func runTrafficMode(ctx context.Context, output *terminalOutput, cfg runConfig, 
 }
 
 func startNodes(ctx context.Context, output *terminalOutput, cfg runConfig, mode testMode) ([]*realNode, error) {
-	var tlsConfig *tls.Config
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 	if cfg.InsecureTLS {
-		tlsConfig = &tls.Config{InsecureSkipVerify: true} // test-only control servers
+		tlsConfig.InsecureSkipVerify = true // test-only control servers
 	}
 	nodes := make([]*realNode, 0, len(cfg.Nodes))
 	for _, nodeCfg := range cfg.Nodes {

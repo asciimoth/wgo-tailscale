@@ -54,6 +54,7 @@ func TestDERPSTUNLatencyReport(t *testing.T) {
 	reports := make(chan DERPLatencyReport, 1)
 	bind, err := NewBind(Config{
 		Network: gonnect.NativeConfig{}.Build(), NodePrivate: mustPrivate(t), DiscoPrivate: mustPrivate(t),
+		TLSConfig:     testTLSConfig(),
 		OnDERPLatency: func(report DERPLatencyReport) { reports <- report },
 	})
 	if err != nil {
@@ -109,7 +110,7 @@ func TestDERPHTTPSLatencyUsesConfiguredNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bind := &Bind{cfg: Config{Network: gonnect.NativeConfig{}.Build()}}
+	bind := &Bind{cfg: Config{Network: gonnect.NativeConfig{}.Build(), TLSConfig: testTLSConfig()}}
 	latency, err := bind.measureDERPHTTPSLatency(context.Background(), &controlproto.DERPNode{
 		HostName: "127.0.0.1", DERPPort: port, InsecureForTests: true,
 	})
@@ -118,6 +119,32 @@ func TestDERPHTTPSLatencyUsesConfiguredNetwork(t *testing.T) {
 	}
 	if latency < 15*time.Millisecond || latency > time.Second {
 		t.Fatalf("HTTPS latency = %v", latency)
+	}
+}
+
+func TestDERPHTTPSLatencyUsesTLSConfig(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, rawPort, err := net.SplitHostPort(parsed.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(rawPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := server.Client().Transport.(*http.Transport)
+	bind := &Bind{cfg: Config{Network: gonnect.NativeConfig{}.Build(), TLSConfig: transport.TLSClientConfig}}
+	if _, err := bind.measureDERPHTTPSLatency(context.Background(), &controlproto.DERPNode{
+		HostName: host, DERPPort: port,
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -146,8 +173,8 @@ func TestDERPCheckFallsBackToHTTPSWithoutUDPDiscovery(t *testing.T) {
 	reports := make(chan DERPLatencyReport, 1)
 	bind, err := NewBind(Config{
 		Network: gonnect.NativeConfig{}.Build(), NodePrivate: mustPrivate(t), DiscoPrivate: mustPrivate(t),
-		DisableDiscovery: true,
-		OnDERPLatency:    func(report DERPLatencyReport) { reports <- report },
+		TLSConfig: testTLSConfig(), DisableDiscovery: true,
+		OnDERPLatency: func(report DERPLatencyReport) { reports <- report },
 	})
 	if err != nil {
 		t.Fatal(err)
