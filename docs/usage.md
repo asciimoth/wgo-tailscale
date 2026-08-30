@@ -165,6 +165,18 @@ The view is the reduced packet filter delivered to this node by control.
 `ACLAllows` is a convenience query over that view. Neither method installs a
 firewall or enforces packets, and the API is not a Tailnet administration API.
 
+To configure a `gonnect/tun.Firewall`, convert the flattened ACL view to an
+incoming allow list:
+
+```go
+firewall.SetConfig(client.ACLFirewallConfig())
+```
+
+The generated rules preserve remote source addresses, local destination
+addresses, protocols, and service ports. They do not restrict outgoing traffic
+because `gonnect.FirewallConfig.Exclude` is a deny list, while the Tailscale
+packet filter is an allow list. The conversion does not install the config.
+
 ## Consume desired network configuration
 
 ```go

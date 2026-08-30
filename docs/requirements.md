@@ -16,7 +16,7 @@ configuration.
 | UDP-blocked tunnel | Implemented | standard DERP datagrams over HTTPS/TLS, including DERP-only bind startup when UDP sockets are unavailable; direct-candidate fallback if DERP itself fails | DERP-only bind/framing tests; Docker cycle forces and asserts DERP traffic |
 | MagicDNS without system integration | Implemented | immutable `DNSView`; live in-memory `LookupNetIP`, `LookupHost`, and `LookupAddr` | DNS lookup/revision/event tests |
 | Desired network provider | Implemented | `DesiredNetworkConfiguration` returns interface name, up/down, MTU, addresses, routes, and DNS; never applies them | network and shutdown tests |
-| Read-only ACL | Implemented | flattened and named immutable rule views plus optional `ACLAllows` query; no enforcement or administration | ACL matching and deep-copy tests |
+| Read-only ACL | Implemented | flattened and named immutable rule views, optional `ACLAllows` query, and conversion to a gonnect TUN incoming firewall config; no automatic enforcement or administration | ACL matching, firewall conversion, and deep-copy tests |
 | Rich changing views | Implemented | coherent `Snapshot`, focused getters, typed node/client/DERP/path data, raw node JSON, monotonic revisions, coalescable subscriptions | view deep-copy and event-order tests |
 | UI-neutral user interaction | Implemented | `Interaction`, `EventInteraction`, `ResumeInteraction`; registration polling remains cancellable | interaction test; Headscale registrar; optional hosted-service stdout flow |
 | Optional peer confirmation | Implemented | awaiting peers remain visible but outside both wgo and the tailnet bind until `ConfirmPeer`; revocation withdraws them | confirmation/network/cache tests |
