@@ -1,14 +1,17 @@
 # Application usage guide
 
-This guide starts after the application already has a `gonnect.Network`, an
-existing wgo device, a TUN chosen by the application, and a private key assigned
-to that device. TUN creation and operating-system configuration are deliberately
-not covered here.
+This guide starts after the application has a `gonnect.Network`. The
+application can attach a wgo `device.DeviceAPI` now or later. The API must refer
+to a device with a private key. TUN creation and operating-system configuration
+are deliberately not covered here.
 
 ## Attach the controller
 
 ```go
-client, err := tailscale.New(network, dev, tailscale.Options{
+api := device.DetachDevice(dev)
+defer api.Close()
+
+client, err := tailscale.New(network, api, tailscale.Options{
     Hostname:   "laptop",
     ControlURL: tailscale.DefaultControlURL, // or a Headscale URL
     TLSConfig:  &tls.Config{MinVersion: tls.VersionTLS12},
@@ -30,10 +33,43 @@ if err := client.Start(ctx); err != nil {
 defer client.Close()
 ```
 
-The wgo device must already have a nonzero private key. The node registered
-with control uses that exact key. If control asks for node-key rotation, the
-client reports `tailscale.ErrNodeKeyExpired`; the host must decide how to
-replace or recreate its shared identity.
+The first usable API must have a nonzero private key. The node registered with
+control uses that exact key. If control asks for node-key rotation, the client
+reports `tailscale.ErrNodeKeyExpired`; the host must decide how to replace or
+recreate its shared identity.
+
+## Attach or replace a device API after Start
+
+The client can start before the application has a device API:
+
+```go
+client, err := tailscale.New(network, nil, options)
+if err != nil { return err }
+if err := client.Start(ctx); err != nil { return err }
+
+api := device.DetachDevice(dev)
+if err := client.AttachDevice(api); err != nil { return err }
+```
+
+Before attachment, the client stays in `StateStarting`. The attachment sets the
+node identity, installs the tracked transport, starts control synchronization,
+and applies all current peers.
+
+If an attached detached API closes, it removes this client's tracked transport
+and peers. Its closed API does not occupy the attachment slot. Attach a new
+wrapper or another device API with the same private key:
+
+```go
+api.Close()
+
+replacement := device.DetachDevice(dev) // or another device with the same key
+if err := client.AttachDevice(replacement); err != nil { return err }
+```
+
+`AttachDevice` rejects an open occupied slot with
+`ErrDeviceAlreadyAttached`. It rejects a replacement with a different node key
+with `ErrNodeIdentityChanged`. The client never calls `Close`, `Up`, or `Down`
+on an attached API.
 
 ## Present authentication without coupling a UI
 
@@ -95,13 +131,16 @@ or administer the control service.
 
 ## Share one wgo device with another control plane
 
-Start both controllers against the same `*device.Device`:
+Give each controller a detached API for the same `*device.Device`:
 
 ```go
-thirdParty, err := otherplane.NewController(dev, otherOptions)
+thirdPartyAPI := device.DetachDevice(dev)
+tailscaleAPI := device.DetachDevice(dev)
+
+thirdParty, err := otherplane.NewController(thirdPartyAPI, otherOptions)
 if err != nil { return err }
 
-tailscaleClient, err := tailscale.New(network, dev, tailscale.Options{
+tailscaleClient, err := tailscale.New(network, tailscaleAPI, tailscale.Options{
     Hostname:    "combined-node",
     TransportID: "tailscale", // not the default or the other controller's ID
     TLSConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
@@ -113,9 +152,8 @@ if err := tailscaleClient.Start(ctx); err != nil { return err }
 ```
 
 Both services see the device's one public key. They must assign disjoint peer
-public keys and route prefixes. `wgo-tailscale` publishes only its complete peer
-specs, and on close it deletes a peer only if its current endpoint still uses
-the client's named transport. An existing spec on another transport produces
+public keys and route prefixes. `wgo-tailscale` publishes complete peer specs
+with tracked ownership. An existing spec on another transport produces
 `ErrPeerConflict` rather than being overwritten.
 
 The host shuts down controllers before the shared resources:
@@ -124,6 +162,8 @@ The host shuts down controllers before the shared resources:
 cancelControllers()
 _ = tailscaleClient.Close()
 thirdParty.Wait()
+tailscaleAPI.Close()
+thirdPartyAPI.Close()
 dev.Close()
 // Close or detach the host's concrete network if that network has a lifecycle.
 ```

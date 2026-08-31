@@ -21,22 +21,26 @@ import (
 )
 
 // Client coordinates one Tailscale control-plane identity with one named
-// transport and a set of peers on an existing wgo device. It never changes the
-// device private key and never owns the device lifecycle.
+// transport and a set of peers through an attachable wgo device API. It never
+// changes the device private key and never owns the device API lifecycle.
 type Client struct {
 	network gonnect.Network
-	device  WGODevice
 	opts    Options
 
-	lifeMu      sync.Mutex
-	started     bool
-	closed      bool
-	done        chan struct{}
-	doneOnce    sync.Once
-	closeError  error
-	wg          sync.WaitGroup
-	reconcileMu sync.Mutex
-	cacheMu     sync.Mutex
+	lifeMu         sync.Mutex
+	started        bool
+	runtimeStarted bool
+	closed         bool
+	done           chan struct{}
+	doneOnce       sync.Once
+	closeError     error
+	wg             sync.WaitGroup
+	reconcileMu    sync.Mutex
+	cacheMu        sync.Mutex
+
+	deviceMu         sync.RWMutex
+	deviceAPI        device.DeviceAPI
+	deviceGeneration uint64
 
 	mu             sync.RWMutex
 	ctx            context.Context
@@ -105,11 +109,17 @@ type appliedPeer struct {
 }
 
 // New constructs a client. Network is mandatory for control, DNS, STUN, DISCO,
-// and DERP. Direct peer traffic also uses it unless Options selects wgo's
-// default transport for direct peers.
-func New(network gonnect.Network, dev WGODevice, options Options) (*Client, error) {
-	if err := validateDependencies(network, dev); err != nil {
+// and DERP. api is optional and can be attached later with AttachDevice. Direct
+// peer traffic also uses Network unless Options selects wgo's default
+// transport for direct peers.
+func New(network gonnect.Network, api device.DeviceAPI, options Options) (*Client, error) {
+	if err := validateDependencies(network); err != nil {
 		return nil, err
+	}
+	if nilDeviceAPI(api) {
+		api = nil
+	} else if closedDeviceAPI(api) {
+		return nil, device.ErrDeviceClosed
 	}
 	opts, err := options.withDefaults()
 	if err != nil {
@@ -117,7 +127,7 @@ func New(network gonnect.Network, dev WGODevice, options Options) (*Client, erro
 	}
 	return &Client{
 		network:      network,
-		device:       dev,
+		deviceAPI:    api,
 		opts:         opts,
 		done:         make(chan struct{}),
 		state:        StateNew,
@@ -133,9 +143,10 @@ func New(network gonnect.Network, dev WGODevice, options Options) (*Client, erro
 	}, nil
 }
 
-// Start installs the client's named transport and starts asynchronous control
-// synchronization. Authentication that needs a person is surfaced through
-// Interaction and events; Start itself does not wait for that person.
+// Start begins asynchronous control synchronization. If no usable device API
+// is attached, Start waits in StateStarting until AttachDevice supplies one.
+// Authentication that needs a person is surfaced through Interaction and
+// events; Start itself does not wait for that person.
 func (c *Client) Start(parent context.Context) error {
 	if parent == nil {
 		return errors.New("tailscale: nil start context")
@@ -148,8 +159,65 @@ func (c *Client) Start(parent context.Context) error {
 	if c.started {
 		return ErrAlreadyStarted
 	}
+	ctx, cancel := context.WithCancel(parent)
+	c.mu.Lock()
+	c.ctx, c.cancel = ctx, cancel
+	c.info = ClientInfo{
+		ControlURL: c.opts.ControlURL, Hostname: c.opts.Hostname,
+		TransportID: c.opts.TransportID, StartedAt: time.Now(),
+		Ephemeral: c.opts.Ephemeral, PeerConfirmation: c.opts.ConfirmPeers,
+		CapabilityVersion: controlproto.CurrentCapabilityVersion,
+	}
+	c.state = StateStarting
+	c.bumpLocked()
+	c.mu.Unlock()
 
-	wgoPrivate := c.device.PrivateKey()
+	c.deviceMu.RLock()
+	api := c.deviceAPI
+	usableAPI := !nilDeviceAPI(api) && !closedDeviceAPI(api)
+	c.deviceMu.RUnlock()
+	if usableAPI {
+		if err := c.initializeRuntime(ctx, api); err != nil {
+			cancel()
+			c.mu.Lock()
+			c.state = StateNew
+			c.ctx, c.cancel = nil, nil
+			c.info = ClientInfo{}
+			c.mu.Unlock()
+			return err
+		}
+		c.deviceMu.Lock()
+		c.deviceGeneration++
+		c.deviceMu.Unlock()
+	}
+	c.deviceMu.RLock()
+	generation := c.deviceGeneration
+	runtimeStarted := c.runtimeStarted
+	c.deviceMu.RUnlock()
+
+	c.started = true
+	c.mu.RLock()
+	startEvent := c.eventLocked(EventState, nil)
+	metadataEvent := c.eventLocked(EventMetadata, nil)
+	c.mu.RUnlock()
+	c.events.publish(startEvent)
+	c.events.publish(metadataEvent)
+	if runtimeStarted {
+		c.launchRuntimeLocked(ctx)
+		c.watchDeviceLocked(ctx, api, generation)
+	}
+	go func() {
+		<-ctx.Done()
+		_ = c.Close()
+	}()
+	return nil
+}
+
+// initializeRuntime creates the identity-bound control and transport
+// resources. The caller must hold lifeMu so initialization cannot race with
+// another attachment or client shutdown.
+func (c *Client) initializeRuntime(ctx context.Context, api device.DeviceAPI) error {
+	wgoPrivate := api.PrivateKey()
 	if wgoPrivate.IsZero() {
 		return ErrZeroNodeKey
 	}
@@ -159,8 +227,9 @@ func (c *Client) Start(parent context.Context) error {
 	if device.NoisePublicKey(nodePublic) != wgoPublic {
 		return errors.New("tailscale: invalid wgo node key")
 	}
+
 	c.cacheMu.Lock()
-	cache, _, err := loadOrCreateCache(parent, c.opts.Cache, [32]byte(nodePublic))
+	cache, _, err := loadOrCreateCache(ctx, c.opts.Cache, [32]byte(nodePublic))
 	if err != nil {
 		c.cacheMu.Unlock()
 		return err
@@ -175,11 +244,12 @@ func (c *Client) Start(parent context.Context) error {
 		c.cacheMu.Unlock()
 		return err
 	}
-	if err := storeCache(parent, c.opts.Cache, cache); err != nil {
+	if err := storeCache(ctx, c.opts.Cache, cache); err != nil {
 		c.cacheMu.Unlock()
 		return err
 	}
 	c.cacheMu.Unlock()
+
 	machinePrivate := controlproto.PrivateKey(machineRaw)
 	discoPrivate := controlproto.PrivateKey(discoRaw)
 	control, err := controlproto.NewClient(c.network, c.opts.ControlURL, machinePrivate, c.opts.TLSConfig)
@@ -196,50 +266,34 @@ func (c *Client) Start(parent context.Context) error {
 		_ = control.Close()
 		return err
 	}
-	ctx, cancel := context.WithCancel(parent)
+	if err := api.AddTrackedTransport(c.opts.TransportID, device.TransportConfig{Bind: bind, ListenPort: c.opts.ListenPort}); err != nil {
+		_ = bind.Shutdown()
+		_ = control.Close()
+		return fmt.Errorf("tailscale: add wgo transport %q: %w", c.opts.TransportID, err)
+	}
 
 	c.mu.Lock()
-	c.ctx, c.cancel = ctx, cancel
 	c.nodePrivate, c.machinePrivate, c.discoPrivate = nodePrivate, machinePrivate, discoPrivate
 	c.cache, c.control, c.bind = cache, control, bind
 	for _, id := range cache.ConfirmedPeerIDs {
 		c.confirmed[id] = true
 	}
-	c.info = ClientInfo{
-		ControlURL: c.opts.ControlURL, Hostname: c.opts.Hostname,
-		NodePublicKey: wgoPublic, MachinePublicKey: machinePrivate.PublicMachine().String(),
-		DiscoPublicKey: discoPrivate.PublicDisco().String(), BackendLogID: cache.BackendLogID,
-		TransportID: c.opts.TransportID, StartedAt: time.Now(),
-		Ephemeral: c.opts.Ephemeral, PeerConfirmation: c.opts.ConfirmPeers,
-		CapabilityVersion: controlproto.CurrentCapabilityVersion,
-	}
-	c.state = StateStarting
-	c.bumpLocked()
+	c.info.NodePublicKey = wgoPublic
+	c.info.MachinePublicKey = machinePrivate.PublicMachine().String()
+	c.info.DiscoPublicKey = discoPrivate.PublicDisco().String()
+	c.info.BackendLogID = cache.BackendLogID
+	c.lastError = ""
 	c.mu.Unlock()
+	c.runtimeStarted = true
+	return nil
+}
 
-	if err := c.device.AddTransport(c.opts.TransportID, device.TransportConfig{Bind: bind, ListenPort: c.opts.ListenPort}); err != nil {
-		cancel()
-		_ = bind.Shutdown()
-		_ = control.Close()
-		c.mu.Lock()
-		c.state = StateNew
-		c.ctx, c.cancel, c.control, c.bind = nil, nil, nil, nil
-		c.mu.Unlock()
-		return fmt.Errorf("tailscale: add wgo transport %q: %w", c.opts.TransportID, err)
-	}
-	c.started = true
-	c.mu.RLock()
-	startEvent := c.eventLocked(EventState, nil)
-	c.mu.RUnlock()
-	c.events.publish(startEvent)
+// launchRuntimeLocked starts the identity-bound workers once. The caller must
+// hold lifeMu so Close cannot begin while workers are added to the wait group.
+func (c *Client) launchRuntimeLocked(ctx context.Context) {
 	c.wg.Add(2)
 	go func() { defer c.wg.Done(); c.run(ctx) }()
 	go func() { defer c.wg.Done(); c.endpointUpdater(ctx) }()
-	go func() {
-		<-ctx.Done()
-		_ = c.Close()
-	}()
-	return nil
 }
 
 // Close stops only resources and peers owned by this client. It does not stop
@@ -291,7 +345,13 @@ func (c *Client) Close() error {
 	}
 	c.wg.Wait()
 	removeErr := c.removeOwnedPeers()
-	transportErr := c.device.RemoveTransport(c.opts.TransportID)
+	c.deviceMu.RLock()
+	api := c.deviceAPI
+	var transportErr error
+	if c.runtimeStarted && !nilDeviceAPI(api) {
+		transportErr = externalDeviceCloseError(api.RemoveTrackedTransport(c.opts.TransportID))
+	}
+	c.deviceMu.RUnlock()
 	if bind != nil {
 		_ = bind.Shutdown()
 	}
@@ -722,6 +782,9 @@ func (c *Client) eventLocked(kind EventKind, err error) Event {
 }
 
 func (c *Client) removeOwnedPeers() error {
+	c.deviceMu.RLock()
+	defer c.deviceMu.RUnlock()
+	api := c.deviceAPI
 	c.reconcileMu.Lock()
 	defer c.reconcileMu.Unlock()
 	c.mu.RLock()
@@ -734,9 +797,15 @@ func (c *Client) removeOwnedPeers() error {
 	var errs []error
 	for _, key := range keys {
 		public := device.NoisePublicKey(key)
-		if spec, ok := c.device.PeerSpec(public); ok && peerSpecStillOwned(spec, applied[key]) {
-			if _, err := c.device.DeletePeer(public); err != nil {
-				errs = append(errs, err)
+		if !nilDeviceAPI(api) {
+			spec, exists := api.PeerSpec(public)
+			if !exists || peerSpecStillOwned(spec, applied[key]) {
+				if _, err := api.DeleteTrackedPeer(public); err != nil {
+					err = externalDeviceCloseError(err)
+					if err != nil {
+						errs = append(errs, err)
+					}
+				}
 			}
 		}
 		if c.bind != nil {

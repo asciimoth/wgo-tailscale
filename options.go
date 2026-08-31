@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"log/slog"
+	"reflect"
 	"time"
 
 	"github.com/asciimoth/gonnect"
@@ -17,20 +18,6 @@ const (
 	// DefaultTransportID is the named wgo transport owned by a Client.
 	DefaultTransportID device.TransportID = "tailscale"
 )
-
-// WGODevice is the portion of a master-branch wgo device used by Client. A
-// *device.Device implements this interface. The narrow interface also makes it
-// possible to test control-plane behavior without creating a TUN.
-type WGODevice interface {
-	PrivateKey() device.NoisePrivateKey
-	UpsertPeer(device.PeerSpec) error
-	DeletePeer(device.NoisePublicKey) (bool, error)
-	PeerSpec(device.NoisePublicKey) (device.PeerSpec, bool)
-	AddTransport(device.TransportID, device.TransportConfig) error
-	RemoveTransport(device.TransportID) error
-}
-
-var _ WGODevice = (*device.Device)(nil)
 
 // CacheCallbacks persist private machine/discovery identity and peer
 // confirmations. The blob is versioned JSON owned by this package. Callbacks
@@ -159,12 +146,37 @@ func (o Options) withDefaults() (Options, error) {
 	return o, nil
 }
 
-func validateDependencies(network gonnect.Network, dev WGODevice) error {
+func validateDependencies(network gonnect.Network) error {
 	if network == nil {
 		return errors.New("tailscale: nil gonnect.Network")
 	}
-	if dev == nil {
-		return errors.New("tailscale: nil wgo device")
-	}
 	return nil
+}
+
+// nilDeviceAPI reports nil interfaces and interfaces that hold typed nil
+// implementations. Public attachment methods use it to avoid a delayed panic.
+func nilDeviceAPI(api device.DeviceAPI) bool {
+	if api == nil {
+		return true
+	}
+	value := reflect.ValueOf(api)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+// closedDeviceAPI performs a nonblocking lifecycle check.
+func closedDeviceAPI(api device.DeviceAPI) bool {
+	if nilDeviceAPI(api) {
+		return false
+	}
+	select {
+	case <-api.Wait():
+		return true
+	default:
+		return false
+	}
 }

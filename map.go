@@ -446,6 +446,13 @@ type desiredPeer struct {
 }
 
 func (c *Client) reconcilePeers() {
+	c.deviceMu.RLock()
+	api := c.deviceAPI
+	if nilDeviceAPI(api) || closedDeviceAPI(api) {
+		c.deviceMu.RUnlock()
+		return
+	}
+	defer c.deviceMu.RUnlock()
 	c.reconcileMu.Lock()
 	defer c.reconcileMu.Unlock()
 	c.mu.RLock()
@@ -478,8 +485,9 @@ func (c *Client) reconcilePeers() {
 			continue
 		}
 		public := device.NoisePublicKey(key)
-		if current, ok := c.device.PeerSpec(public); ok && peerSpecStillOwned(current, applied[key]) {
-			if _, err := c.device.DeletePeer(public); err != nil {
+		current, exists := api.PeerSpec(public)
+		if !exists || peerSpecStillOwned(current, applied[key]) {
+			if _, err := api.DeleteTrackedPeer(public); err != nil {
 				c.setPeerError(key, fmt.Errorf("tailscale: remove peer %s: %w", applied[key].id, err))
 				continue
 			}
@@ -498,7 +506,7 @@ func (c *Client) reconcilePeers() {
 
 	for key, wanted := range desired {
 		public := device.NoisePublicKey(key)
-		current, exists := c.device.PeerSpec(public)
+		current, exists := api.PeerSpec(public)
 		owned, alreadyOwned := applied[key]
 		if alreadyOwned && exists && !peerSpecStillOwned(current, owned) {
 			c.mu.Lock()
@@ -538,7 +546,7 @@ func (c *Client) reconcilePeers() {
 			Endpoint:  c.peerEndpoint(wanted),
 			AmneziaWG: amnezia, Activation: device.PeerActivationEager,
 		}
-		if err := c.device.UpsertPeer(spec); err != nil {
+		if err := api.UpsertTrackedPeer(spec); err != nil {
 			if !alreadyOwned && c.bind != nil {
 				c.bind.RemovePeer(key)
 			}

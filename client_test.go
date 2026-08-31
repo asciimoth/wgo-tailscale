@@ -20,11 +20,21 @@ import (
 )
 
 type fakeDevice struct {
+	device.DeviceAPI
+
 	mu         sync.Mutex
 	private    device.NoisePrivateKey
 	peers      map[device.NoisePublicKey]device.PeerSpec
 	transports map[device.TransportID]device.TransportConfig
 	deleteErr  error
+	done       chan struct{}
+	closeOnce  sync.Once
+
+	trackedPeerUpserts    int
+	trackedPeerDeletes    int
+	trackedTransportAdds  int
+	trackedTransportDrops int
+	untrackedChanges      int
 }
 
 func newFakeDevice(t *testing.T) *fakeDevice {
@@ -33,19 +43,32 @@ func newFakeDevice(t *testing.T) *fakeDevice {
 	if err := private.FromHex(strings.Repeat("11", 32)); err != nil {
 		t.Fatal(err)
 	}
-	return &fakeDevice{private: private, peers: make(map[device.NoisePublicKey]device.PeerSpec), transports: make(map[device.TransportID]device.TransportConfig)}
+	return &fakeDevice{
+		private: private, peers: make(map[device.NoisePublicKey]device.PeerSpec),
+		transports: make(map[device.TransportID]device.TransportConfig), done: make(chan struct{}),
+	}
 }
 
+func (d *fakeDevice) Close()                             { d.closeOnce.Do(func() { close(d.done) }) }
+func (d *fakeDevice) Wait() chan struct{}                { return d.done }
 func (d *fakeDevice) PrivateKey() device.NoisePrivateKey { return d.private }
 func (d *fakeDevice) UpsertPeer(spec device.PeerSpec) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.peers[spec.PublicKey] = cloneTestSpec(spec)
+	d.untrackedChanges++
+	d.upsertPeerLocked(spec)
 	return nil
+}
+func (d *fakeDevice) upsertPeerLocked(spec device.PeerSpec) {
+	d.peers[spec.PublicKey] = cloneTestSpec(spec)
 }
 func (d *fakeDevice) DeletePeer(key device.NoisePublicKey) (bool, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.untrackedChanges++
+	return d.deletePeerLocked(key)
+}
+func (d *fakeDevice) deletePeerLocked(key device.NoisePublicKey) (bool, error) {
 	if d.deleteErr != nil {
 		return false, d.deleteErr
 	}
@@ -63,6 +86,10 @@ func (d *fakeDevice) PeerSpec(key device.NoisePublicKey) (device.PeerSpec, bool)
 func (d *fakeDevice) AddTransport(id device.TransportID, config device.TransportConfig) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.untrackedChanges++
+	return d.addTransportLocked(id, config)
+}
+func (d *fakeDevice) addTransportLocked(id device.TransportID, config device.TransportConfig) error {
 	if _, exists := d.transports[id]; exists {
 		return errors.New("duplicate transport")
 	}
@@ -72,7 +99,37 @@ func (d *fakeDevice) AddTransport(id device.TransportID, config device.Transport
 func (d *fakeDevice) RemoveTransport(id device.TransportID) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.untrackedChanges++
+	d.removeTransportLocked(id)
+	return nil
+}
+func (d *fakeDevice) removeTransportLocked(id device.TransportID) {
 	delete(d.transports, id)
+}
+func (d *fakeDevice) UpsertTrackedPeer(spec device.PeerSpec) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.trackedPeerUpserts++
+	d.upsertPeerLocked(spec)
+	return nil
+}
+func (d *fakeDevice) DeleteTrackedPeer(key device.NoisePublicKey) (bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.trackedPeerDeletes++
+	return d.deletePeerLocked(key)
+}
+func (d *fakeDevice) AddTrackedTransport(id device.TransportID, config device.TransportConfig) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.trackedTransportAdds++
+	return d.addTransportLocked(id, config)
+}
+func (d *fakeDevice) RemoveTrackedTransport(id device.TransportID) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.trackedTransportDrops++
+	d.removeTransportLocked(id)
 	return nil
 }
 

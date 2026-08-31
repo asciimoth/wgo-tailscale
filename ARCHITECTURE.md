@@ -7,20 +7,22 @@ controller attached to that host:
 
 | Resource | Owner | Library behavior |
 |---|---|---|
-| `device.Device` and lifecycle | Host | Uses it; never calls `Up`, `Down`, or `Close` |
+| `device.DeviceAPI` and lifecycle | Host | Can attach it before or after `Start`; never calls `Up`, `Down`, or `Close` |
 | TUN | Host | Never creates, configures, or reads it directly |
-| WireGuard node private key | Host/wgo | Reads once at `Start`; never generates, rotates, or overwrites it |
+| WireGuard node private key | Host/wgo | Reads from the first usable API; requires the same key after API replacement; never generates, rotates, or overwrites it |
 | Default wgo transport | Host/other controller | Never changes it |
-| Named `tailscale` transport | This client | Adds at start and removes at close |
-| [Tailscale](https://tailscale.com/kb/1151/what-is-tailscale)-owned peers | This client | Uses complete `UpsertPeer` specs and guarded `DeletePeer` calls |
+| Named `tailscale` transport | This client | Uses tracked add and remove calls; a detached API releases it when the API closes |
+| [Tailscale](https://tailscale.com/kb/1151/what-is-tailscale)-owned peers | This client | Uses complete tracked peer specs; a detached API releases them when the API closes |
 | Other peers | Other controllers | Never enumerated for replacement or bulk-deleted |
 | OS addresses, routes, DNS, firewall | Host | Exposed as desired/read-only views only |
 | Network I/O and name lookup | Supplied `gonnect.Network` | Mandatory path for control, lookup, STUN, DISCO, DERP, and direct peer traffic unless direct endpoints use wgo's default transport |
 
-The client rejects a zero wgo private key. Cached state contains the node public
-key fingerprint, so reusing cache with a different wgo node key fails with
-`ErrNodeIdentityChanged`. An expiry/rotation request from control is surfaced as
-`ErrNodeKeyExpired`; the client does not silently replace the key.
+The client can start without a device API and waits in `StateStarting`. It
+rejects a zero private key when an API becomes usable. Cached state contains the
+node public-key fingerprint, so a replacement API or cache with a different
+node key fails with `ErrNodeIdentityChanged`. An expiry or rotation request from
+control is surfaced as `ErrNodeKeyExpired`; the client does not silently
+replace the key.
 
 ## Components
 
@@ -38,7 +40,7 @@ flowchart TD
     Client --> Control["ts2021 control client"]
     Client --> Views["DNS, ACL, network views"]
     Client --> Bind["DISCO / STUN / DERP bind"]
-    Client --> WGO["existing wgo device"]
+    Client --> WGO["attachable wgo DeviceAPI"]
     Control --> Network["mandatory gonnect.Network"]
     Bind --> Network
     Bind --> WGO
@@ -128,8 +130,8 @@ The desired peer set contains control peers that pass local confirmation. For
 each desired peer, the client publishes a complete `device.PeerSpec`. By
 default the spec selects its named transport. With
 `UseDefaultTransportForDirectPeers`, direct specs can select wgo's default
-transport. For a removed peer it calls `DeletePeer` only when the current spec
-still has the endpoint this client wrote.
+transport. For a removed peer it calls `DeleteTrackedPeer` only when the
+current spec is absent or still has the endpoint this client wrote.
 
 If a public key already has a spec on another transport, the client reports
 `ErrPeerConflict` and leaves that spec untouched. In default-transport direct
@@ -171,20 +173,23 @@ machine and DISCO keys.
 stateDiagram-v2
     [*] --> New
     New --> Starting: Start
+    Starting --> Starting: attach device API
     Starting --> NeedsAuthentication: auth URL
     NeedsAuthentication --> Running: approved
     Starting --> Running: auth key / known node
-    Running --> Degraded: control error
-    Degraded --> Running: map reconnect
+    Running --> Degraded: control error / device API closes
+    Degraded --> Running: map reconnect / attach matching API
     Running --> Stopping: Close / context done
     NeedsAuthentication --> Stopping: Close / context done
     Degraded --> Stopping: Close / context done
     Stopping --> Stopped
 ```
 
-Shutdown cancels control work, removes only owned peers, removes the named
-transport, closes DISCO/DERP resources, and waits for client goroutines. It does
-not close the shared wgo device or `gonnect.Network`.
+Shutdown cancels control work, removes tracked peers and the tracked named
+transport from the current API, closes DISCO/DERP resources, and waits for
+client goroutines. It does not close the attached API, shared wgo device, or
+`gonnect.Network`. If a detached API closes first, it releases those tracked
+resources. A later matching API receives the current transport and peer state.
 
 ## Compatibility and intentional limits
 

@@ -24,9 +24,9 @@ Implemented features:
   endpoint discovery, authenticated
   [DISCO](https://pkg.go.dev/tailscale.com/disco) probing, and DERP over TLS
   fallback with latency-aware home-region selection;
-- publication of complete peer specifications through wgo's multi-controller
-  `UpsertPeer`/`DeletePeer` API and a named transport, with an option to use
-  wgo's default transport for direct UDP peer endpoints;
+- publication of complete peer specifications through tracked
+  `device.DeviceAPI` peer and transport methods, with an option to use wgo's
+  default transport for direct UDP peer endpoints;
 - optional local peer confirmation and optional AmneziaWG configuration;
 - UI-neutral authentication interactions and change subscriptions;
 - versioned callback-based cache state;
@@ -50,9 +50,12 @@ default transport already sends packets through the wanted network.
 ```go
 network := (&gonnect.NativeConfig{}).Build()
 
-// dev is an existing *device.Device. The host has already assigned its one
-// WireGuard private key. The same dev may be used by other controllers.
-client, err := tailscale.New(network, dev, tailscale.Options{
+// dev is an existing *device.Device with its WireGuard private key. A detached
+// API gives this controller an independent resource lifetime.
+api := device.DetachDevice(dev)
+defer api.Close()
+
+client, err := tailscale.New(network, api, tailscale.Options{
     Hostname:    "my-vpn-node",
     ControlURL: tailscale.DefaultControlURL,
     TLSConfig:  &tls.Config{MinVersion: tls.VersionTLS12},
@@ -67,9 +70,11 @@ if err := client.Start(ctx); err != nil {
 defer client.Close()
 ```
 
-`Start` returns after attaching the named wgo transport. If registration needs
-a person, `Snapshot().Interaction` contains an authorization URL while the
-client continues running and remains cancellable.
+When an API is present, `Start` returns after it attaches the tracked wgo
+transport. `Start` also accepts a nil API. In that case, the client stays in
+`StateStarting` until `AttachDevice` supplies one. If registration needs a
+person, `Snapshot().Interaction` contains an authorization URL while the client
+continues running and remains cancellable.
 
 See the [application usage guide](docs/usage.md) for shared-device ownership,
 interactions, DNS, ACLs, cache handling, and desired network configuration.
