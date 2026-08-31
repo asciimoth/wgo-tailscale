@@ -8,8 +8,8 @@ github.com/asciimoth/gonnect-netstack v0.5.2 h1:OfbhZgPWH29fOoGOQLldAN70yssEhGLe
 github.com/asciimoth/gonnect-netstack v0.5.2/go.mod h1:jX1x/qtUikHKd9KMVz1QMiwKbngsEOz0b2WNK9SZay8=
 github.com/asciimoth/tuntap v0.3.30 h1:ezpxxHRF5CIzA+R3hZyXE6UMa7YJecFjlzBnD7jT/kk=
 github.com/asciimoth/tuntap v0.3.30/go.mod h1:EqFsmjUHRovceZuHFSvesQjypSGO0wy5/iI436zHRkw=
-github.com/asciimoth/wgo v0.6.2 h1:11uRFMPQiu4IdmR/bMJb5TEn/X+EA/IPNxnUJNfxVE4=
-github.com/asciimoth/wgo v0.6.2/go.mod h1:2rPMrYdgKfKxqX3bnbWlXzCkOWiJPcTjfPdh+qegZS4=
+github.com/asciimoth/wgo v0.7.0 h1:T3clpkNkrDti9Y2CllfZaXkEyn7DVo7XIHcnkdHMVCU=
+github.com/asciimoth/wgo v0.7.0/go.mod h1:2rPMrYdgKfKxqX3bnbWlXzCkOWiJPcTjfPdh+qegZS4=
 github.com/google/btree v1.1.2 h1:xf4v41cLI2Z6FxbKm+8Bu+m8ifhj15JuZ9sa0jZCMUU=
 github.com/google/btree v1.1.2/go.mod h1:qOPhT0dTNdNzV6Z/lhRX0YXUafgPLFUh+gZMl761Gm4=
 golang.org/x/crypto v0.51.0 h1:IBPXwPfKxY7cWQZ38ZCIRPI50YLeevDLlLnyC5wRGTI=
