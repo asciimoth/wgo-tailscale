@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/asciimoth/gonnect"
@@ -66,6 +67,9 @@ type derpRegionSlot struct {
 	mu     sync.Mutex
 	config *controlproto.DERPRegion
 	client *derpClient
+
+	connecting atomic.Bool
+	connected  atomic.Bool
 }
 
 type derpClient struct {
@@ -107,8 +111,12 @@ func (m *derpManager) updateMap(value *controlproto.DERPMap) {
 		if region == nil && slot.client != nil {
 			slot.client.close()
 			slot.client = nil
+			slot.connected.Store(false)
 		}
 		slot.mu.Unlock()
+		if region == nil {
+			delete(m.slots, id)
+		}
 	}
 	m.mu.Unlock()
 }
@@ -139,7 +147,15 @@ func (m *derpManager) ensureAsync(region int64) {
 	if err != nil {
 		return
 	}
+	if !slot.connecting.CompareAndSwap(false, true) {
+		return
+	}
+	if slot.connected.Load() {
+		slot.connecting.Store(false)
+		return
+	}
 	go func() {
+		defer slot.connecting.Store(false)
 		ctx, cancel := context.WithTimeout(m.ctx, 15*time.Second)
 		defer cancel()
 		if _, err := slot.getClient(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -210,6 +226,7 @@ func (s *derpRegionSlot) getClient(ctx context.Context) (*derpClient, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.client != nil {
+		s.connected.Store(true)
 		return s.client, nil
 	}
 	if s.config == nil {
@@ -224,6 +241,7 @@ func (s *derpRegionSlot) getClient(ctx context.Context) (*derpClient, error) {
 		if err == nil {
 			client.onClose = s.clear
 			s.client = client
+			s.connected.Store(true)
 			go client.readLoop()
 			return client, nil
 		}
@@ -246,6 +264,7 @@ func (s *derpRegionSlot) clear(expected *derpClient) {
 		return
 	}
 	s.client = nil
+	s.connected.Store(false)
 	s.mu.Unlock()
 	if client != nil {
 		client.close()

@@ -99,10 +99,14 @@ func resolveDNSName(records map[string][]DNSRecord, name, network string, seen m
 		switch strings.ToUpper(record.Type) {
 		case "A", "AAAA":
 			address, err := netip.ParseAddr(record.Value)
-			if err != nil || (network == "ip4" && !address.Is4()) || (network == "ip6" && !address.Is6()) {
+			if err != nil {
 				continue
 			}
-			result = append(result, address.Unmap())
+			address = address.Unmap()
+			if (network == "ip4" && !address.Is4()) || (network == "ip6" && !address.Is6()) {
+				continue
+			}
+			result = append(result, address)
 		case "CNAME":
 			result = append(result, resolveDNSName(records, normalizeDNSName(record.Value), network, seen)...)
 		}

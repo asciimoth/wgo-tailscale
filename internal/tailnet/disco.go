@@ -28,6 +28,9 @@ const (
 	discoVersion            = byte(0)
 	discoEndpoint           = 16 + 2
 	maxCallMeMaybeEndpoints = 256
+	maxControlPeerEndpoints = 256
+	maxLearnedPeerEndpoints = 256
+	discoCandidateLifetime  = 2 * time.Minute
 )
 
 type pendingPing struct {
@@ -205,23 +208,78 @@ func (b *Bind) handleDisco(packet []byte, source netip.AddrPort, derpSource cont
 		}
 		if len(fresh) > 0 {
 			b.mu.Lock()
-			if state := b.peers[node]; state != nil {
-				for _, endpoint := range fresh {
-					if !slices.Contains(state.candidates, endpoint) {
-						state.candidates = append(state.candidates, endpoint)
-					}
-					b.byAddr[endpoint] = node
-				}
-				state.lastProbe = time.Time{}
-			}
+			changed := b.addLearnedCandidatesLocked(node, fresh, time.Now())
 			b.mu.Unlock()
-			b.probePeer(node)
+			if changed {
+				b.probePeer(node)
+			}
 		}
 	}
 	return true
 }
 
+func (b *Bind) addLearnedCandidatesLocked(node controlproto.NodePublic, fresh []netip.AddrPort, now time.Time) bool {
+	state := b.peers[node]
+	if state == nil {
+		return false
+	}
+	changed := b.pruneLearnedCandidatesLocked(node, state, now)
+	if state.learned == nil {
+		state.learned = make(map[netip.AddrPort]time.Time)
+	}
+	for _, endpoint := range fresh {
+		endpoint = unmapAddrPort(endpoint)
+		if !endpoint.IsValid() || slices.Contains(state.config.Endpoints, endpoint) {
+			continue
+		}
+		if _, exists := state.learned[endpoint]; exists {
+			state.learned[endpoint] = now
+			b.byAddr[endpoint] = node
+			continue
+		}
+		if len(state.learned) >= maxLearnedPeerEndpoints {
+			continue
+		}
+		state.learned[endpoint] = now
+		b.byAddr[endpoint] = node
+		changed = true
+	}
+	if changed {
+		rebuildPeerCandidates(state)
+	}
+	return changed
+}
+
+func (b *Bind) pruneLearnedCandidatesLocked(node controlproto.NodePublic, state *peerState, now time.Time) bool {
+	changed := false
+	for endpoint, observed := range state.learned {
+		if now.Sub(observed) <= discoCandidateLifetime {
+			continue
+		}
+		delete(state.learned, endpoint)
+		if b.byAddr[endpoint] == node && state.direct != endpoint {
+			delete(b.byAddr, endpoint)
+		}
+		changed = true
+	}
+	if changed {
+		rebuildPeerCandidates(state)
+	}
+	return changed
+}
+
+func rebuildPeerCandidates(state *peerState) {
+	state.candidates = slices.Clone(state.config.Endpoints)
+	learned := make([]netip.AddrPort, 0, len(state.learned))
+	for endpoint := range state.learned {
+		learned = append(learned, endpoint)
+	}
+	slices.SortFunc(learned, func(a, c netip.AddrPort) int { return a.Compare(c) })
+	state.candidates = append(state.candidates, learned...)
+}
+
 func (b *Bind) setDirect(node controlproto.NodePublic, addr netip.AddrPort, latency time.Duration) {
+	addr = unmapAddrPort(addr)
 	if !addr.IsValid() || addr.Addr().IsUnspecified() || addr.Addr().IsMulticast() || addr.Port() == 0 {
 		return
 	}

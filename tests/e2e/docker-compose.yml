@@ -8,7 +8,9 @@ services:
       - |
         for name in headscale headscale-alpha headscale-beta; do
           mkdir -p "/state/$$name"
-          if [ ! -s "/state/$$name/tls.crt" ]; then
+          if [ ! -s "/state/$$name/tls.key" ] || \
+            [ ! -s "/state/$$name/tls.crt" ] || \
+            ! openssl x509 -checkend 86400 -noout -in "/state/$$name/tls.crt" >/dev/null 2>&1; then
             openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
               -subj "/CN=$$name" \
               -addext "subjectAltName=DNS:$$name" \

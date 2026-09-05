@@ -14,6 +14,7 @@ import (
 
 	batchudp "github.com/asciimoth/batchudp"
 	"github.com/asciimoth/gonnect"
+	"github.com/asciimoth/wgo-tailscale/internal/controlproto"
 )
 
 type udpBlockedNetwork struct{ gonnect.Network }
@@ -21,6 +22,26 @@ type udpBlockedNetwork struct{ gonnect.Network }
 func (n *udpBlockedNetwork) ListenUDP(context.Context, string, string) (gonnect.UDPConn, error) {
 	return nil, errors.New("UDP unavailable")
 }
+
+type singleReadUDPConn struct {
+	gonnect.UDPConn
+	packet []byte
+	source netip.AddrPort
+	read   bool
+}
+
+func (c *singleReadUDPConn) ReadFromUDPAddrPort(buffer []byte) (int, netip.AddrPort, error) {
+	if c.read {
+		return 0, netip.AddrPort{}, net.ErrClosed
+	}
+	c.read = true
+	return copy(buffer, c.packet), c.source, nil
+}
+
+type textAddr string
+
+func (a textAddr) Network() string { return "udp" }
+func (a textAddr) String() string  { return string(a) }
 
 func testTLSConfig() *tls.Config {
 	return &tls.Config{MinVersion: tls.VersionTLS12}
@@ -75,6 +96,99 @@ func TestBindDirectDatagram(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("direct datagram timed out")
+	}
+}
+
+func TestBindNormalizesIPv4MappedUDPAddresses(t *testing.T) {
+	mapped := netip.MustParseAddrPort("[::ffff:192.0.2.10]:41641")
+	unmapped := netip.MustParseAddrPort("192.0.2.10:41641")
+	node := mustPrivate(t).PublicNode()
+	pathUpdates := make(chan PathUpdate, 1)
+	bind := &Bind{
+		cfg: Config{DisableDiscovery: true, OnPath: func(update PathUpdate) {
+			pathUpdates <- update
+		}},
+		open: true, generation: 1, inbound: make(chan inboundPacket, 1),
+		peers:   map[controlproto.NodePublic]*peerState{node: {}},
+		byDisco: make(map[controlproto.DiscoPublic]controlproto.NodePublic),
+		byAddr:  map[netip.AddrPort]controlproto.NodePublic{unmapped: node},
+	}
+	conn := &singleReadUDPConn{packet: []byte("wireguard"), source: mapped}
+	bind.readUDP(t.Context(), 1, conn)
+	packet := <-bind.inbound
+	endpoint, ok := packet.ep.(*logicalEndpoint)
+	if !ok || endpoint.node != node || endpoint.direct.IsValid() {
+		t.Fatalf("mapped source lookup endpoint = %#v", packet.ep)
+	}
+
+	parsed, err := bind.ParseEndpoint("udp:" + mapped.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	direct, ok := parsed.(*logicalEndpoint)
+	if !ok || direct.direct != unmapped {
+		t.Fatalf("parsed mapped endpoint = %#v, want %v", parsed, unmapped)
+	}
+	converted, err := addrPort(textAddr(mapped.String()))
+	if err != nil || converted != unmapped {
+		t.Fatalf("converted mapped address = %v, %v; want %v", converted, err, unmapped)
+	}
+
+	bind.setDirect(node, mapped, time.Millisecond)
+	update := <-pathUpdates
+	if update.Direct != unmapped || bind.peers[node].direct != unmapped {
+		t.Fatalf("mapped direct path = callback:%v state:%v", update.Direct, bind.peers[node].direct)
+	}
+	bind.UpdatePeer(PeerConfig{NodeKey: node, Endpoints: []netip.AddrPort{mapped, unmapped}})
+	if got := bind.peers[node].candidates; !slices.Equal(got, []netip.AddrPort{unmapped}) {
+		t.Fatalf("normalized candidates = %v, want [%v]", got, unmapped)
+	}
+}
+
+func TestUpdatePeerPreservesProbeStateForUnchangedConfig(t *testing.T) {
+	bind, err := NewBind(Config{
+		Network: gonnect.NativeConfig{}.Build(), NodePrivate: mustPrivate(t),
+		DiscoPrivate: mustPrivate(t), TLSConfig: testTLSConfig(), DisableDERP: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := mustPrivate(t).PublicNode()
+	disco := mustPrivate(t).PublicDisco()
+	configured := netip.MustParseAddrPort("192.0.2.10:41641")
+	fresh := netip.MustParseAddrPort("198.51.100.10:41641")
+	config := PeerConfig{NodeKey: node, DiscoKey: disco, Endpoints: []netip.AddrPort{configured}, HomeDERP: 1}
+	bind.UpdatePeer(config)
+	probeAt := time.Now()
+	bind.mu.Lock()
+	bind.peers[node].lastProbe = probeAt
+	bind.peers[node].candidates = append(bind.peers[node].candidates, fresh)
+	bind.byAddr[fresh] = node
+	bind.mu.Unlock()
+
+	bind.UpdatePeer(config)
+	bind.mu.RLock()
+	lastProbe := bind.peers[node].lastProbe
+	candidates := slices.Clone(bind.peers[node].candidates)
+	bind.mu.RUnlock()
+	if lastProbe != probeAt {
+		t.Fatalf("unchanged config changed last probe from %v to %v", probeAt, lastProbe)
+	}
+	if !slices.Equal(candidates, []netip.AddrPort{configured, fresh}) {
+		t.Fatalf("unchanged config candidates = %v", candidates)
+	}
+
+	config.HomeDERP = 2
+	bind.UpdatePeer(config)
+	bind.mu.RLock()
+	lastProbe = bind.peers[node].lastProbe
+	candidates = slices.Clone(bind.peers[node].candidates)
+	bind.mu.RUnlock()
+	if !lastProbe.IsZero() {
+		t.Fatalf("changed config preserved last probe %v", lastProbe)
+	}
+	if !slices.Equal(candidates, []netip.AddrPort{configured}) {
+		t.Fatalf("changed config candidates = %v", candidates)
 	}
 }
 

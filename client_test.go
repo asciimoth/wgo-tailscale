@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/netip"
 	"reflect"
 	"slices"
@@ -358,7 +359,8 @@ func TestDefaultTransportForKnownDirectPathUsesWGODefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	peer := newControlNode(t, 2, "known-direct", "known.example.test", "100.64.0.2/32")
-	direct := netip.MustParseAddrPort("198.51.100.20:41641")
+	direct := netip.MustParseAddrPort("[::ffff:198.51.100.20]:41641")
+	wantDirect := netip.MustParseAddrPort("198.51.100.20:41641")
 	client.peerLocal[peer.Key] = &peerLocalState{path: PathDirect, direct: direct}
 	if err := client.applyMapResponse(controlproto.MapResponse{Peers: []*controlproto.Node{peer}}); err != nil {
 		t.Fatal(err)
@@ -367,8 +369,206 @@ func TestDefaultTransportForKnownDirectPathUsesWGODefault(t *testing.T) {
 	if !ok || spec.Endpoint == nil {
 		t.Fatalf("wgo peer spec = %#v, %v", spec, ok)
 	}
-	if spec.Endpoint.Transport != device.DefaultTransportID || spec.Endpoint.Address != direct.String() {
+	if spec.Endpoint.Transport != device.DefaultTransportID || spec.Endpoint.Address != wantDirect.String() {
 		t.Fatalf("endpoint = %#v, want known direct endpoint", spec.Endpoint)
+	}
+}
+
+func TestPathUpdatesCoalescePeerReconciles(t *testing.T) {
+	dev := newFakeDevice(t)
+	client, err := New(gonnect.NativeConfig{}.Build(), dev, Options{
+		Hostname: "coalesced-path", TLSConfig: testTLSConfig(),
+		UseDefaultTransportForDirectPeers: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := newControlNode(t, 2, "coalesced-peer", "coalesced.example.test", "100.64.0.2/32")
+	if err := client.applyMapResponse(controlproto.MapResponse{Peers: []*controlproto.Node{peer}}); err != nil {
+		t.Fatal(err)
+	}
+
+	dev.mu.Lock()
+	initialUpserts := dev.trackedPeerUpserts
+	dev.mu.Unlock()
+	var direct netip.AddrPort
+	for i := 1; i <= 100; i++ {
+		direct = netip.AddrPortFrom(netip.AddrFrom4([4]byte{192, 0, 2, byte(i)}), 41641)
+		client.onPath(tailnet.PathUpdate{
+			NodeKey: peer.Key, Kind: "direct", Direct: direct,
+			Latency: time.Duration(i) * time.Millisecond, At: time.Now(),
+		})
+	}
+	if got := len(client.reconcileWake); got != 1 {
+		t.Fatalf("queued reconciles = %d, want 1", got)
+	}
+	<-client.reconcileWake
+	client.reconcilePeers()
+
+	dev.mu.Lock()
+	upsertsAfterPathChanges := dev.trackedPeerUpserts
+	dev.mu.Unlock()
+	if upsertsAfterPathChanges != initialUpserts+1 {
+		t.Fatalf("path-change upserts = %d, want %d", upsertsAfterPathChanges, initialUpserts+1)
+	}
+	spec, ok := dev.PeerSpec(device.NoisePublicKey(peer.Key))
+	if !ok || spec.Endpoint == nil || spec.Endpoint.Address != direct.String() {
+		t.Fatalf("coalesced peer endpoint = %#v, %v; want %v", spec.Endpoint, ok, direct)
+	}
+
+	for i := 101; i <= 200; i++ {
+		client.onPath(tailnet.PathUpdate{
+			NodeKey: peer.Key, Kind: "direct", Direct: direct,
+			Latency: time.Duration(i) * time.Millisecond, At: time.Now(),
+		})
+	}
+	if got := len(client.reconcileWake); got != 0 {
+		t.Fatal("latency-only path updates scheduled a peer reconcile")
+	}
+	dev.mu.Lock()
+	finalUpserts := dev.trackedPeerUpserts
+	dev.mu.Unlock()
+	if finalUpserts != upsertsAfterPathChanges {
+		t.Fatalf("latency-only upserts = %d, want %d", finalUpserts, upsertsAfterPathChanges)
+	}
+}
+
+func TestReconcilePeersSkipsUnchangedPeer(t *testing.T) {
+	client, dev := newUnitClient(t, false)
+	peer := newControlNode(t, 2, "stable-peer", "stable.example.test", "100.64.0.2/32")
+	if err := client.applyMapResponse(controlproto.MapResponse{Peers: []*controlproto.Node{peer}}); err != nil {
+		t.Fatal(err)
+	}
+	events, unsubscribe := client.Subscribe(4)
+	defer unsubscribe()
+	dev.mu.Lock()
+	initialUpserts := dev.trackedPeerUpserts
+	dev.mu.Unlock()
+
+	client.reconcilePeers()
+
+	dev.mu.Lock()
+	finalUpserts := dev.trackedPeerUpserts
+	dev.mu.Unlock()
+	if finalUpserts != initialUpserts {
+		t.Fatalf("unchanged reconcile upserts = %d, want %d", finalUpserts, initialUpserts)
+	}
+	select {
+	case event := <-events:
+		t.Fatalf("unchanged reconcile published %q event", event.Kind)
+	default:
+	}
+}
+
+func TestControlPingQueueIsBoundedAndDeduplicated(t *testing.T) {
+	client, _ := newUnitClient(t, false)
+	for index := 0; index < maxPendingControlPings+20; index++ {
+		client.answerControlPing(&controlproto.PingRequest{URL: fmt.Sprintf("https://control.example.test/ping/%d", index)})
+	}
+	if got := len(client.pingWake); got != maxPendingControlPings {
+		t.Fatalf("queued control pings = %d, want %d", got, maxPendingControlPings)
+	}
+	client.pingMu.Lock()
+	pending := len(client.pingPending)
+	client.pingMu.Unlock()
+	if pending != maxPendingControlPings {
+		t.Fatalf("pending control pings = %d, want %d", pending, maxPendingControlPings)
+	}
+
+	duplicate := controlproto.PingRequest{URL: "https://control.example.test/ping/1"}
+	client.answerControlPing(&duplicate)
+	if got := len(client.pingWake); got != maxPendingControlPings {
+		t.Fatalf("duplicate control ping changed queue length to %d", got)
+	}
+}
+
+func TestRemovedPeerDoesNotReuseStaleDirectPath(t *testing.T) {
+	dev := newFakeDevice(t)
+	client, err := New(gonnect.NativeConfig{}.Build(), dev, Options{
+		Hostname: "peer-removal", TLSConfig: testTLSConfig(),
+		UseDefaultTransportForDirectPeers: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := newControlNode(t, 2, "removed-peer", "removed.example.test", "100.64.0.2/32")
+	if err := client.applyMapResponse(controlproto.MapResponse{Peers: []*controlproto.Node{peer}}); err != nil {
+		t.Fatal(err)
+	}
+	direct := netip.MustParseAddrPort("198.51.100.20:41641")
+	client.onPath(tailnet.PathUpdate{NodeKey: peer.Key, Kind: "direct", Direct: direct, At: time.Now()})
+	if err := client.applyMapResponse(controlproto.MapResponse{Peers: []*controlproto.Node{}}); err != nil {
+		t.Fatal(err)
+	}
+	client.mu.RLock()
+	_, retained := client.peerLocal[peer.Key]
+	client.mu.RUnlock()
+	if retained {
+		t.Fatal("removed peer retained local path state")
+	}
+	client.onPath(tailnet.PathUpdate{NodeKey: peer.Key, Kind: "direct", Direct: direct, At: time.Now()})
+	client.mu.RLock()
+	_, recreated := client.peerLocal[peer.Key]
+	client.mu.RUnlock()
+	if recreated {
+		t.Fatal("late path update recreated state for removed peer")
+	}
+
+	if err := client.applyMapResponse(controlproto.MapResponse{Peers: []*controlproto.Node{peer}}); err != nil {
+		t.Fatal(err)
+	}
+	spec, ok := dev.PeerSpec(device.NoisePublicKey(peer.Key))
+	if !ok || spec.Endpoint == nil || spec.Endpoint.Transport != DefaultTransportID {
+		t.Fatalf("re-added peer endpoint = %#v, %v; want named transport", spec.Endpoint, ok)
+	}
+}
+
+func TestIdenticalMapResponseDoesNotPublishEvents(t *testing.T) {
+	client, dev := newUnitClient(t, false)
+	self := newControlNode(t, 1, "self", "self.example.test", "100.64.0.1/32")
+	peer := newControlNode(t, 2, "stable-map-peer", "peer.example.test", "100.64.0.2/32")
+	bits := 32
+	response := controlproto.MapResponse{
+		Node: self, Peers: []*controlproto.Node{peer},
+		DERPMap: &controlproto.DERPMap{Regions: map[int64]*controlproto.DERPRegion{
+			1: {RegionID: 1, Nodes: []*controlproto.DERPNode{{Name: "derp-1"}}},
+		}},
+		DNSConfig: &controlproto.DNSConfig{Domains: []string{"tail.example.test"}},
+		PacketFilter: []controlproto.FilterRule{{
+			SrcIPs: []string{"100.64.0.1"},
+			DstPorts: []controlproto.NetPortRange{{
+				IP: "100.64.0.2", Bits: &bits, Ports: controlproto.PortRange{First: 443, Last: 443},
+			}},
+		}},
+		UserProfiles: []controlproto.UserProfile{{ID: 1, LoginName: "user@example.test"}},
+		Domain:       "tail.example.test", Health: []string{"healthy"},
+	}
+	if err := client.applyMapResponse(response); err != nil {
+		t.Fatal(err)
+	}
+	beforeRevision := client.Snapshot().Revision
+	dev.mu.Lock()
+	beforeUpserts := dev.trackedPeerUpserts
+	dev.mu.Unlock()
+	events, unsubscribe := client.Subscribe(16)
+	defer unsubscribe()
+
+	if err := client.applyMapResponse(response); err != nil {
+		t.Fatal(err)
+	}
+	if after := client.Snapshot().Revision; after != beforeRevision {
+		t.Fatalf("identical map changed revision from %d to %d", beforeRevision, after)
+	}
+	dev.mu.Lock()
+	afterUpserts := dev.trackedPeerUpserts
+	dev.mu.Unlock()
+	if afterUpserts != beforeUpserts {
+		t.Fatalf("identical map upserts = %d, want %d", afterUpserts, beforeUpserts)
+	}
+	select {
+	case event := <-events:
+		t.Fatalf("identical map published %q event", event.Kind)
+	default:
 	}
 }
 
@@ -646,6 +846,54 @@ func TestMagicDNSAndACLViews(t *testing.T) {
 	}
 	if client.ACL().NamedRules["base"][0].SourceIPs[0] == "mutated" {
 		t.Fatal("named ACL view was not an immutable copy")
+	}
+}
+
+func TestMappedControlAddressesAreNormalized(t *testing.T) {
+	client, dev := newUnitClient(t, false)
+	peer := newControlNode(t, 2, "mapped-peer", "mapped.tail.example", "100.64.0.2/32")
+	mappedPrefix := netip.MustParsePrefix("::ffff:100.64.0.2/128")
+	unmappedPrefix := netip.MustParsePrefix("100.64.0.2/32")
+	mappedEndpoint := netip.MustParseAddrPort("[::ffff:192.0.2.10]:41641")
+	unmappedEndpoint := netip.MustParseAddrPort("192.0.2.10:41641")
+	peer.Addresses = []netip.Prefix{mappedPrefix, unmappedPrefix}
+	peer.AllowedIPs = []netip.Prefix{mappedPrefix, unmappedPrefix}
+	peer.PrimaryRoutes = []netip.Prefix{mappedPrefix}
+	peer.Endpoints = []netip.AddrPort{mappedEndpoint, unmappedEndpoint}
+	if err := client.applyMapResponse(controlproto.MapResponse{
+		Peers: []*controlproto.Node{peer},
+		DNSConfig: &controlproto.DNSConfig{
+			Nameservers: []netip.Addr{netip.MustParseAddr("::ffff:192.0.2.53")},
+			ExtraRecords: []controlproto.DNSRecord{{
+				Name: "mapped-record.tail.example", Value: "::ffff:192.0.2.20",
+			}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	view, ok := client.Peer("mapped-peer")
+	if !ok {
+		t.Fatal("mapped peer is missing")
+	}
+	if !slices.Equal(view.Node.Addresses, []netip.Prefix{unmappedPrefix}) ||
+		!slices.Equal(view.Node.AllowedIPs, []netip.Prefix{unmappedPrefix}) ||
+		!slices.Equal(view.Node.Endpoints, []netip.AddrPort{unmappedEndpoint}) {
+		t.Fatalf("normalized peer addresses = addresses:%v allowed:%v endpoints:%v", view.Node.Addresses, view.Node.AllowedIPs, view.Node.Endpoints)
+	}
+	spec, _ := dev.PeerSpec(device.NoisePublicKey(peer.Key))
+	if !slices.Equal(spec.AllowedIPs, []netip.Prefix{unmappedPrefix}) {
+		t.Fatalf("device allowed IPs = %v, want %v", spec.AllowedIPs, unmappedPrefix)
+	}
+	dns := client.DNS()
+	if !slices.Equal(dns.Nameservers, []netip.Addr{netip.MustParseAddr("192.0.2.53")}) {
+		t.Fatalf("DNS nameservers = %v", dns.Nameservers)
+	}
+	addresses, err := client.Resolver().LookupNetIP(t.Context(), "ip4", "mapped-record.tail.example")
+	if err != nil || !slices.Equal(addresses, []netip.Addr{netip.MustParseAddr("192.0.2.20")}) {
+		t.Fatalf("mapped IPv4 DNS lookup = %v, %v", addresses, err)
+	}
+	if _, err := client.Resolver().LookupNetIP(t.Context(), "ip6", "mapped-record.tail.example"); err == nil {
+		t.Fatal("mapped IPv4 DNS record matched an IPv6 lookup")
 	}
 }
 

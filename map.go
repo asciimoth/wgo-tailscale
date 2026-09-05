@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"net/netip"
+	"reflect"
 	"slices"
 	"sort"
 	"time"
@@ -14,6 +15,8 @@ import (
 	"github.com/asciimoth/wgo-tailscale/internal/tailnet"
 	"github.com/asciimoth/wgo/device"
 )
+
+const maxPendingControlPings = 16
 
 func (c *Client) applyMapResponse(response controlproto.MapResponse) error {
 	if response.KeepAlive {
@@ -31,7 +34,7 @@ func (c *Client) applyMapResponse(response controlproto.MapResponse) error {
 	var derpChanged bool
 	var derpBindingChanged bool
 	var preferredDERPChanged bool
-	var peersChanged bool
+	var reconcileRequested bool
 	var dnsNodesChanged bool
 	var ping *controlproto.PingRequest
 	c.mu.Lock()
@@ -47,15 +50,16 @@ func (c *Client) applyMapResponse(response controlproto.MapResponse) error {
 	}
 	if response.ControlTime != nil {
 		value := *response.ControlTime
-		c.controlTime = &value
-		c.controlTimeAt = time.Now()
-		kinds = append(kinds, EventMetadata)
+		if c.controlTime == nil || !c.controlTime.Equal(value) {
+			c.controlTime = &value
+			c.controlTimeAt = time.Now()
+			kinds = append(kinds, EventMetadata)
+		}
 	}
-	if response.PingRequest != nil && response.PingRequest.URL != "" && response.PingRequest.URL != c.lastPingURL {
+	if response.PingRequest != nil && response.PingRequest.URL != "" {
 		value := *response.PingRequest
 		value.Payload = slices.Clone(response.PingRequest.Payload)
 		ping = &value
-		c.lastPingURL = value.URL
 	}
 	if response.PopBrowserURL != "" && response.PopBrowserURL != c.lastBrowserURL {
 		c.lastBrowserURL = response.PopBrowserURL
@@ -67,49 +71,77 @@ func (c *Client) applyMapResponse(response controlproto.MapResponse) error {
 		kinds = append(kinds, EventInteraction)
 	}
 	if response.Node != nil {
-		derpBindingChanged = true
-		dnsNodesChanged = true
-		c.self = cloneControlNode(response.Node)
-		kinds = append(kinds, EventSelf, EventNetwork)
+		next := cloneControlNode(response.Node)
+		if !reflect.DeepEqual(c.self, next) {
+			derpBindingChanged = true
+			dnsNodesChanged = true
+			c.self = next
+			kinds = append(kinds, EventSelf, EventNetwork)
+		}
 	}
 	if response.Peers != nil {
-		peersChanged = true
-		dnsNodesChanged = true
-		c.peers = make(map[int64]*controlproto.Node, len(response.Peers))
+		reconcileRequested = true
+		next := make(map[int64]*controlproto.Node, len(response.Peers))
 		for _, node := range response.Peers {
 			if node != nil {
-				c.peers[node.ID] = cloneControlNode(node)
+				next[node.ID] = cloneControlNode(node)
 			}
 		}
-		kinds = append(kinds, EventPeers, EventNetwork)
+		if !controlNodeMapsEqual(c.peers, next) {
+			dnsNodesChanged = true
+			c.peers = next
+			kinds = append(kinds, EventPeers, EventNetwork)
+		}
 	}
+	changedPeers := false
 	for _, node := range response.PeersChanged {
 		if node != nil {
-			c.peers[node.ID] = cloneControlNode(node)
+			next := cloneControlNode(node)
+			if !reflect.DeepEqual(c.peers[node.ID], next) {
+				c.peers[node.ID] = next
+				changedPeers = true
+			}
 		}
 	}
 	if len(response.PeersChanged) != 0 {
-		peersChanged = true
+		reconcileRequested = true
+	}
+	if changedPeers {
 		dnsNodesChanged = true
 		kinds = append(kinds, EventPeers, EventNetwork)
 	}
+	removedPeers := false
 	for _, id := range response.PeersRemoved {
-		delete(c.peers, id)
+		if _, exists := c.peers[id]; exists {
+			delete(c.peers, id)
+			removedPeers = true
+		}
 	}
 	if len(response.PeersRemoved) != 0 {
-		peersChanged = true
+		reconcileRequested = true
+	}
+	if removedPeers {
 		dnsNodesChanged = true
 		kinds = append(kinds, EventPeers, EventNetwork)
 	}
+	patchedPeers := false
 	for _, patch := range response.PeersChangedPatch {
-		if peerPatchChangesPath(patch) {
-			peersChanged = true
+		var before *controlproto.Node
+		if patch != nil {
+			before = cloneControlNode(c.peers[patch.NodeID])
+			if before != nil && peerPatchChangesPath(patch) {
+				reconcileRequested = true
+			}
 		}
 		c.applyPeerPatchLocked(patch)
+		if patch != nil && !reflect.DeepEqual(before, c.peers[patch.NodeID]) {
+			patchedPeers = true
+		}
 	}
-	if len(response.PeersChangedPatch) != 0 || len(response.OnlineChange) != 0 || len(response.PeerSeenChange) != 0 {
+	if patchedPeers {
 		kinds = append(kinds, EventPeers)
 	}
+	seenChanged := false
 	for id, seen := range response.PeerSeenChange {
 		if node := c.peers[id]; node != nil {
 			if seen {
@@ -118,83 +150,117 @@ func (c *Client) applyMapResponse(response controlproto.MapResponse) error {
 					value = *response.ControlTime
 				}
 				node.LastSeen = &value
-			} else {
+				seenChanged = true
+			} else if node.LastSeen != nil {
 				node.LastSeen = nil
+				seenChanged = true
 			}
 		}
 	}
+	onlineChanged := false
 	for id, online := range response.OnlineChange {
 		if node := c.peers[id]; node != nil {
-			value := online
-			node.Online = &value
-		}
-	}
-	if response.DERPMap != nil {
-		c.derpMap = mergeDERPMap(c.derpMap, response.DERPMap)
-		for regionID := range c.derpLatency {
-			if !usableDERPRegion(c.derpMap.Regions[regionID]) {
-				delete(c.derpLatency, regionID)
+			if node.Online == nil || *node.Online != online {
+				value := online
+				node.Online = &value
+				onlineChanged = true
 			}
 		}
-		preferred := int64(0)
-		if !c.opts.DisableDERP {
-			preferred = choosePreferredDERPMeasured(c.derpMap, c.preferredDERP, c.derpLatency)
+	}
+	if seenChanged || onlineChanged {
+		kinds = append(kinds, EventPeers)
+	}
+	if response.DERPMap != nil {
+		next := mergeDERPMap(c.derpMap, response.DERPMap)
+		if !reflect.DeepEqual(c.derpMap, next) {
+			c.derpMap = next
+			for regionID := range c.derpLatency {
+				if !usableDERPRegion(c.derpMap.Regions[regionID]) {
+					delete(c.derpLatency, regionID)
+				}
+			}
+			preferred := int64(0)
+			if !c.opts.DisableDERP {
+				preferred = choosePreferredDERPMeasured(c.derpMap, c.preferredDERP, c.derpLatency)
+			}
+			if preferred != c.preferredDERP {
+				c.preferredDERP = preferred
+				c.info.PreferredDERP = preferred
+				preferredDERPChanged = true
+				reconcileRequested = true
+				kinds = append(kinds, EventMetadata)
+			}
+			derpChanged = true
+			derpBindingChanged = true
+			kinds = append(kinds, EventDERP)
 		}
-		if preferred != c.preferredDERP {
-			c.preferredDERP = preferred
-			c.info.PreferredDERP = preferred
-			preferredDERPChanged = true
-			peersChanged = true
-			kinds = append(kinds, EventMetadata)
-		}
-		derpChanged = true
-		derpBindingChanged = true
-		kinds = append(kinds, EventDERP)
 	}
 	if response.DNSConfig != nil {
-		c.dns = cloneDNSConfig(response.DNSConfig)
-		kinds = append(kinds, EventDNS, EventNetwork)
+		next := cloneDNSConfig(response.DNSConfig)
+		if !reflect.DeepEqual(c.dns, next) {
+			c.dns = next
+			kinds = append(kinds, EventDNS, EventNetwork)
+		}
 	}
 	if response.PacketFilter != nil {
-		c.namedFilters["base"] = cloneFilters(response.PacketFilter)
-		kinds = append(kinds, EventACL)
+		next := cloneFilters(response.PacketFilter)
+		if !reflect.DeepEqual(c.namedFilters["base"], next) {
+			c.namedFilters["base"] = next
+			kinds = append(kinds, EventACL)
+		}
 	}
 	if response.PacketFilters != nil {
-		if value, ok := response.PacketFilters["*"]; ok && value == nil {
+		filtersChanged := false
+		if value, ok := response.PacketFilters["*"]; ok && value == nil && len(c.namedFilters) != 0 {
 			clear(c.namedFilters)
+			filtersChanged = true
 		}
 		for name, value := range response.PacketFilters {
 			if name == "*" {
 				continue
 			}
 			if value == nil {
-				delete(c.namedFilters, name)
+				if _, exists := c.namedFilters[name]; exists {
+					delete(c.namedFilters, name)
+					filtersChanged = true
+				}
 			} else {
-				c.namedFilters[name] = cloneFilters(value)
+				next := cloneFilters(value)
+				if !reflect.DeepEqual(c.namedFilters[name], next) {
+					c.namedFilters[name] = next
+					filtersChanged = true
+				}
 			}
 		}
-		kinds = append(kinds, EventACL)
+		if filtersChanged {
+			kinds = append(kinds, EventACL)
+		}
 	}
 	if slices.Contains(kinds, EventACL) {
 		c.filters = c.flattenFiltersLocked()
 	}
 	if response.UserProfiles != nil {
+		usersChanged := false
 		for _, update := range response.UserProfiles {
 			update.Groups = slices.Clone(update.Groups)
 			index := slices.IndexFunc(c.users, func(user controlproto.UserProfile) bool { return user.ID == update.ID })
 			if index < 0 {
 				c.users = append(c.users, update)
-			} else {
+				usersChanged = true
+			} else if !reflect.DeepEqual(c.users[index], update) {
 				c.users[index] = update
+				usersChanged = true
 			}
 		}
-		kinds = append(kinds, EventUsers)
+		if usersChanged {
+			kinds = append(kinds, EventUsers)
+		}
 	}
-	if response.Domain != "" {
+	if response.Domain != "" && response.Domain != c.domain {
 		c.domain = response.Domain
 		kinds = append(kinds, EventMetadata)
 	}
-	if response.Health != nil {
+	if response.Health != nil && !slices.Equal(response.Health, c.health) {
 		c.health = slices.Clone(response.Health)
 		kinds = append(kinds, EventMetadata)
 	}
@@ -232,7 +298,7 @@ func (c *Client) applyMapResponse(response controlproto.MapResponse) error {
 		peerExpired = markNodeExpired(node, expiryNow) || peerExpired
 	}
 	if peerExpired {
-		peersChanged = true
+		reconcileRequested = true
 		kinds = append(kinds, EventPeers, EventNetwork)
 	}
 	if c.state == StateDegraded && !selfExpired && (c.interaction == nil || c.interaction.Kind != InteractionNodeKeyExpired) {
@@ -240,9 +306,12 @@ func (c *Client) applyMapResponse(response controlproto.MapResponse) error {
 		c.lastError = ""
 		kinds = append(kinds, EventState)
 	}
-	if len(kinds) == 0 && response.KeepAlive {
+	if len(kinds) == 0 {
 		c.mu.Unlock()
 		c.answerControlPing(ping)
+		if reconcileRequested {
+			c.reconcilePeers()
+		}
 		return nil
 	}
 	c.bumpLocked()
@@ -276,7 +345,7 @@ func (c *Client) applyMapResponse(response controlproto.MapResponse) error {
 	if derpBindingChanged && c.bind != nil {
 		c.bind.UpdateDERPMap(derpMap, selfDERP)
 	}
-	if peersChanged {
+	if reconcileRequested {
 		c.reconcilePeers()
 	}
 	if preferredDERPChanged {
@@ -360,19 +429,51 @@ func (c *Client) answerControlPing(ping *controlproto.PingRequest) {
 		return
 	}
 	c.mu.RLock()
-	ctx := c.ctx
-	control := c.control
+	alreadyAnswered := c.lastPingURL == ping.URL
 	c.mu.RUnlock()
-	if ctx == nil || control == nil {
+	if alreadyAnswered {
 		return
 	}
-	go func() {
-		requestCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		defer cancel()
-		if err := control.AnswerPing(requestCtx, *ping); err != nil && ctx.Err() == nil {
-			c.reportError(fmt.Errorf("tailscale: answer control ping: %w", err), "")
+	c.pingMu.Lock()
+	defer c.pingMu.Unlock()
+	if c.pingPending[ping.URL] {
+		return
+	}
+	select {
+	case c.pingWake <- *ping:
+		c.pingPending[ping.URL] = true
+	default:
+	}
+}
+
+func (c *Client) controlPingWorker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ping := <-c.pingWake:
+			requestCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			c.mu.RLock()
+			control := c.control
+			c.mu.RUnlock()
+			var err error
+			if control != nil {
+				err = control.AnswerPing(requestCtx, ping)
+			}
+			cancel()
+			if err == nil {
+				c.mu.Lock()
+				c.lastPingURL = ping.URL
+				c.mu.Unlock()
+			}
+			c.pingMu.Lock()
+			delete(c.pingPending, ping.URL)
+			c.pingMu.Unlock()
+			if err != nil && ctx.Err() == nil {
+				c.reportError(fmt.Errorf("tailscale: answer control ping: %w", err), "")
+			}
 		}
-	}()
+	}
 }
 
 func uniqueEventKinds(value []EventKind) []EventKind {
@@ -405,7 +506,7 @@ func (c *Client) applyPeerPatchLocked(patch *controlproto.PeerChange) {
 		node.CapMap = cloneCapabilityMap(patch.CapMap)
 	}
 	if patch.Endpoints != nil {
-		node.Endpoints = slices.Clone(patch.Endpoints)
+		node.Endpoints = normalizeAddrPorts(patch.Endpoints)
 	}
 	if patch.Key != nil {
 		node.Key = *patch.Key
@@ -497,9 +598,7 @@ func (c *Client) reconcilePeers() {
 		}
 		c.mu.Lock()
 		delete(c.applied, key)
-		if local := c.peerLocal[key]; local != nil {
-			local.applied = false
-		}
+		delete(c.peerLocal, key)
 		c.mu.Unlock()
 		changed = true
 	}
@@ -546,24 +645,41 @@ func (c *Client) reconcilePeers() {
 			Endpoint:  c.peerEndpoint(wanted),
 			AmneziaWG: amnezia, Activation: device.PeerActivationEager,
 		}
-		if err := api.UpsertTrackedPeer(spec); err != nil {
-			if !alreadyOwned && c.bind != nil {
-				c.bind.RemovePeer(key)
+		needsUpsert := !alreadyOwned || !exists || !peerSpecsEqual(current, spec)
+		if needsUpsert {
+			if err := api.UpsertTrackedPeer(spec); err != nil {
+				if !alreadyOwned && c.bind != nil {
+					c.bind.RemovePeer(key)
+				}
+				c.setPeerError(key, fmt.Errorf("tailscale: apply peer %s: %w", wanted.id, err))
+				continue
 			}
-			c.setPeerError(key, fmt.Errorf("tailscale: apply peer %s: %w", wanted.id, err))
-			continue
 		}
+		desiredApplied := newAppliedPeer(wanted.id, spec.Endpoint)
 		c.mu.Lock()
-		c.applied[key] = newAppliedPeer(wanted.id, spec.Endpoint)
+		previous, wasApplied := c.applied[key]
+		c.applied[key] = desiredApplied
 		local := c.peerLocal[key]
 		if local == nil {
 			local = &peerLocalState{}
 			c.peerLocal[key] = local
 		}
+		localChanged := !local.applied || local.err != ""
 		local.applied, local.err = true, ""
 		c.mu.Unlock()
-		changed = true
+		if needsUpsert || !wasApplied || previous != desiredApplied || localChanged {
+			changed = true
+		}
 	}
+	c.mu.Lock()
+	for key := range c.peerLocal {
+		_, wanted := desired[key]
+		_, stillApplied := c.applied[key]
+		if !wanted && !stillApplied {
+			delete(c.peerLocal, key)
+		}
+	}
+	c.mu.Unlock()
 	if changed {
 		c.mu.Lock()
 		c.bumpLocked()
@@ -576,10 +692,24 @@ func (c *Client) reconcilePeers() {
 	}
 }
 
+func peerSpecsEqual(a, b device.PeerSpec) bool {
+	a.AllowedIPs = slices.Clone(a.AllowedIPs)
+	b.AllowedIPs = slices.Clone(b.AllowedIPs)
+	sort.Slice(a.AllowedIPs, func(i, j int) bool { return a.AllowedIPs[i].String() < a.AllowedIPs[j].String() })
+	sort.Slice(b.AllowedIPs, func(i, j int) bool { return b.AllowedIPs[i].String() < b.AllowedIPs[j].String() })
+	if len(a.AllowedIPs) == 0 {
+		a.AllowedIPs = nil
+	}
+	if len(b.AllowedIPs) == 0 {
+		b.AllowedIPs = nil
+	}
+	return reflect.DeepEqual(a, b)
+}
+
 func (c *Client) peerEndpoint(peer desiredPeer) *device.PeerEndpoint {
 	if c.opts.UseDefaultTransportForDirectPeers {
-		if peer.path == PathDirect && peer.direct.IsValid() {
-			return &device.PeerEndpoint{Transport: device.DefaultTransportID, Address: peer.direct.String()}
+		if direct := unmapAddrPort(peer.direct); peer.path == PathDirect && direct.IsValid() {
+			return &device.PeerEndpoint{Transport: device.DefaultTransportID, Address: direct.String()}
 		}
 		if peer.node.IsWireGuardOnly || c.opts.DisableDERP {
 			if endpoint := firstUsableEndpoint(peer.node.Endpoints); endpoint.IsValid() {
@@ -651,15 +781,17 @@ func cloneControlNode(node *controlproto.Node) *controlproto.Node {
 		return nil
 	}
 	out := *node
-	out.Addresses = slices.Clone(node.Addresses)
-	out.AllowedIPs = slices.Clone(node.AllowedIPs)
-	out.Endpoints = slices.Clone(node.Endpoints)
+	out.Addresses = normalizePrefixes(node.Addresses)
+	out.AllowedIPs = normalizePrefixes(node.AllowedIPs)
+	out.Endpoints = normalizeAddrPorts(node.Endpoints)
+	out.Hostinfo = slices.Clone(node.Hostinfo)
 	out.KeySignature = slices.Clone(node.KeySignature)
 	out.Tags = slices.Clone(node.Tags)
-	out.PrimaryRoutes = slices.Clone(node.PrimaryRoutes)
+	out.PrimaryRoutes = normalizePrefixes(node.PrimaryRoutes)
 	out.Capabilities = slices.Clone(node.Capabilities)
 	out.CapMap = cloneCapabilityMap(node.CapMap)
 	out.ExitNodeDNSResolvers = cloneRawMessages(node.ExitNodeDNSResolvers)
+	out.RawJSON = slices.Clone(node.RawJSON)
 	out.Hostinfo = slices.Clone(node.Hostinfo)
 	out.RawJSON = slices.Clone(node.RawJSON)
 	if node.LastSeen != nil {
@@ -671,14 +803,54 @@ func cloneControlNode(node *controlproto.Node) *controlproto.Node {
 		out.Online = &value
 	}
 	if node.SelfNodeV4MasqAddrForThisPeer != nil {
-		value := *node.SelfNodeV4MasqAddrForThisPeer
+		value := node.SelfNodeV4MasqAddrForThisPeer.Unmap()
 		out.SelfNodeV4MasqAddrForThisPeer = &value
 	}
 	if node.SelfNodeV6MasqAddrForThisPeer != nil {
-		value := *node.SelfNodeV6MasqAddrForThisPeer
+		value := node.SelfNodeV6MasqAddrForThisPeer.Unmap()
 		out.SelfNodeV6MasqAddrForThisPeer = &value
 	}
 	return &out
+}
+
+func normalizePrefixes(values []netip.Prefix) []netip.Prefix {
+	if values == nil {
+		return nil
+	}
+	out := make([]netip.Prefix, 0, len(values))
+	seen := make(map[netip.Prefix]bool, len(values))
+	for _, value := range values {
+		value = unmapPrefix(value)
+		if seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+func normalizeAddrPorts(values []netip.AddrPort) []netip.AddrPort {
+	if values == nil {
+		return nil
+	}
+	out := make([]netip.AddrPort, 0, len(values))
+	seen := make(map[netip.AddrPort]bool, len(values))
+	for _, value := range values {
+		value = unmapAddrPort(value)
+		if seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+func controlNodeMapsEqual(a, b map[int64]*controlproto.Node) bool {
+	return maps.EqualFunc(a, b, func(left, right *controlproto.Node) bool {
+		return reflect.DeepEqual(left, right)
+	})
 }
 
 func cloneCapabilityMap(value map[string][]json.RawMessage) map[string][]json.RawMessage {
@@ -701,7 +873,12 @@ func cloneDNSConfig(value *controlproto.DNSConfig) *controlproto.DNSConfig {
 	}
 	out := *value
 	out.Domains = slices.Clone(value.Domains)
-	out.Nameservers = slices.Clone(value.Nameservers)
+	if value.Nameservers != nil {
+		out.Nameservers = make([]netip.Addr, len(value.Nameservers))
+		for index, address := range value.Nameservers {
+			out.Nameservers[index] = address.Unmap()
+		}
+	}
 	out.CertDomains = slices.Clone(value.CertDomains)
 	out.ExtraRecords = slices.Clone(value.ExtraRecords)
 	if value.Routes != nil {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
+	"time"
 
 	"github.com/asciimoth/wgo/device"
 )
@@ -138,6 +140,10 @@ func (c *Client) clearAppliedDeviceLocked() {
 	for key, local := range c.peerLocal {
 		if local != nil {
 			local.applied = false
+			local.path = PathNone
+			local.direct = netip.AddrPort{}
+			local.latency = 0
+			local.pathAt = time.Time{}
 		}
 		if c.bind != nil {
 			c.bind.RemovePeer(key)

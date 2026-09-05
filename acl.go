@@ -90,11 +90,14 @@ func firewallHostSelectors(raw string, bits int) []string {
 		if err != nil {
 			return nil
 		}
+		prefix = unmapPrefix(prefix)
 		return []string{prefix.Masked().String()}
 	}
 	if first, last, found := strings.Cut(raw, "-"); found {
 		start, startErr := netip.ParseAddr(first)
 		end, endErr := netip.ParseAddr(last)
+		start = start.Unmap()
+		end = end.Unmap()
 		if startErr != nil || endErr != nil || start.BitLen() != end.BitLen() || start.Compare(end) > 0 {
 			return nil
 		}
@@ -109,7 +112,7 @@ func firewallHostSelectors(raw string, bits int) []string {
 	if err != nil {
 		return nil
 	}
-	address = address.Unmap()
+	address, bits = unmapAddressBits(address, bits)
 	if bits < 0 {
 		return []string{address.String()}
 	}
@@ -232,11 +235,14 @@ func matchesIP(raw string, bits int, address netip.Addr) bool {
 	}
 	if strings.Contains(raw, "/") {
 		prefix, err := netip.ParsePrefix(raw)
+		prefix = unmapPrefix(prefix)
 		return err == nil && prefix.Contains(address)
 	}
 	if first, last, found := strings.Cut(raw, "-"); found {
 		start, startErr := netip.ParseAddr(first)
 		end, endErr := netip.ParseAddr(last)
+		start = start.Unmap()
+		end = end.Unmap()
 		if startErr != nil || endErr != nil || start.BitLen() != address.BitLen() || end.BitLen() != address.BitLen() {
 			return false
 		}
@@ -249,6 +255,14 @@ func matchesIP(raw string, bits int, address netip.Addr) bool {
 	if bits < 0 {
 		return base.Unmap() == address.Unmap()
 	}
+	base, bits = unmapAddressBits(base, bits)
 	prefix, err := base.Prefix(bits)
 	return err == nil && prefix.Contains(address)
+}
+
+func unmapAddressBits(address netip.Addr, bits int) (netip.Addr, int) {
+	if address.Is4In6() && bits >= 96 {
+		bits -= 96
+	}
+	return address.Unmap(), bits
 }

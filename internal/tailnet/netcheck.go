@@ -31,6 +31,7 @@ const (
 	derpSTUNProbeTimeout      = 2 * time.Second
 	derpHTTPSProbeTimeout     = 5 * time.Second
 	maxIncrementalDERPRegions = 3
+	maxFullDERPRegions        = 64
 )
 
 type derpProbeTarget struct {
@@ -68,10 +69,15 @@ func (b *Bind) kickDiscovery() {
 			delete(b.stunPending, tx)
 		}
 	}
-	full := !b.cfg.DisableDERP && (len(b.derpLatency) == 0 || now.Sub(b.lastFullDERPCheck) >= derpFullCheckInterval)
+	fullRequested := !b.cfg.DisableDERP && (b.lastFullDERPCheck.IsZero() || now.Sub(b.lastFullDERPCheck) >= derpFullCheckInterval)
+	full := fullRequested
 	targets := selectDERPProbeTargets(b.derpMap, b.selfDERP, b.derpLatency, full)
+	if len(targets) > maxFullDERPRegions {
+		targets = limitDERPProbeTargets(targets, b.selfDERP, maxFullDERPRegions)
+		full = false
+	}
 	if b.cfg.DisableDERP && len(targets) > maxIncrementalDERPRegions {
-		targets = targets[:maxIncrementalDERPRegions]
+		targets = limitDERPProbeTargets(targets, b.selfDERP, maxIncrementalDERPRegions)
 		full = false
 	}
 	if len(targets) == 0 {
@@ -79,7 +85,7 @@ func (b *Bind) kickDiscovery() {
 		return
 	}
 	b.lastDERPCheck = now
-	if full {
+	if fullRequested {
 		b.lastFullDERPCheck = now
 	}
 	b.derpCheckID++
@@ -110,6 +116,28 @@ func (b *Bind) kickDiscovery() {
 		}
 	}
 	go b.finishDERPCheck(ctx, round)
+}
+
+func limitDERPProbeTargets(targets []derpProbeTarget, home int64, limit int) []derpProbeTarget {
+	if limit <= 0 {
+		return nil
+	}
+	if len(targets) <= limit {
+		return targets
+	}
+	selected := slices.Clone(targets[:limit])
+	if home == 0 || slices.ContainsFunc(selected, func(target derpProbeTarget) bool {
+		return target.regionID == home
+	}) {
+		return selected
+	}
+	homeIndex := slices.IndexFunc(targets[limit:], func(target derpProbeTarget) bool {
+		return target.regionID == home
+	})
+	if homeIndex >= 0 {
+		selected[len(selected)-1] = targets[limit+homeIndex]
+	}
+	return selected
 }
 
 func selectDERPProbeTargets(derpMap *controlproto.DERPMap, home int64, latest map[int64]DERPRegionLatency, full bool) []derpProbeTarget {

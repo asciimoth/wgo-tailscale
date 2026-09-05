@@ -56,7 +56,11 @@ func (b *Bind) querySTUN(ctx context.Context, checkID uint64, regionID int64, no
 		if err != nil {
 			return
 		}
-		addresses = append(addresses, resolved...)
+		for _, address := range resolved {
+			if address.IsValid() {
+				addresses = append(addresses, address.Unmap())
+			}
+		}
 	}
 	if len(addresses) == 0 {
 		return
@@ -78,7 +82,7 @@ func (b *Bind) querySTUN(ctx context.Context, checkID uint64, regionID int64, no
 	conn := b.conn
 	b.mu.Unlock()
 	for _, addr := range addresses {
-		if _, err := conn.WriteToUDPAddrPort(request, netip.AddrPortFrom(addr, uint16(port))); err == nil {
+		if _, err := conn.WriteToUDPAddrPort(request, netip.AddrPortFrom(addr.Unmap(), uint16(port))); err == nil {
 			sent = true
 			return
 		}

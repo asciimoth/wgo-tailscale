@@ -99,6 +99,36 @@ func TestACLFirewallConfigDoesNotBroadenInvalidRules(t *testing.T) {
 	}
 }
 
+func TestACLMappedIPv4SelectorsAreNormalized(t *testing.T) {
+	if !matchesIP("::ffff:192.0.2.0/120", -1, netip.MustParseAddr("192.0.2.20")) {
+		t.Fatal("mapped IPv4 CIDR did not match IPv4 address")
+	}
+	if !matchesIP("::ffff:192.0.2.10-::ffff:192.0.2.20", -1, netip.MustParseAddr("192.0.2.15")) {
+		t.Fatal("mapped IPv4 range did not match IPv4 address")
+	}
+	if !matchesIP("::ffff:192.0.2.20", 128, netip.MustParseAddr("192.0.2.20")) {
+		t.Fatal("mapped IPv4 host bits did not match IPv4 address")
+	}
+
+	destinationBits := 120
+	view := ACLView{Rules: []ACLRule{{
+		SourceIPs: []string{"::ffff:192.0.2.0/120"},
+		Destinations: []ACLDestination{{
+			IP: "::ffff:198.51.100.0", Bits: &destinationBits,
+			Ports: PortRange{First: 443, Last: 443},
+		}},
+		IPProtocols: []int{6},
+	}}}
+	config := view.FirewallConfig()
+	if !config.AllowsIncomingIP(
+		6,
+		netip.MustParseAddrPort("192.0.2.20:1234"),
+		netip.MustParseAddrPort("198.51.100.20:443"),
+	) {
+		t.Fatal("mapped IPv4 firewall selectors did not allow IPv4 traffic")
+	}
+}
+
 func TestAddressRangePrefixes(t *testing.T) {
 	for _, raw := range []string{
 		"100.64.0.10-100.64.0.20",

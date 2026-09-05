@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -92,6 +93,7 @@ type inboundPacket struct {
 type peerState struct {
 	config     PeerConfig
 	candidates []netip.AddrPort
+	learned    map[netip.AddrPort]time.Time
 	direct     netip.AddrPort
 	latency    time.Duration
 	directAt   time.Time
@@ -220,7 +222,9 @@ func (b *Bind) Open(port uint16) ([]batchudp.ReceiveFunc, uint16, error) {
 	b.stunPending = make(map[[12]byte]stunProbe)
 	b.pending = make(map[[12]byte]pendingPing)
 	clear(b.byAddr)
+	now := time.Now()
 	for key, peer := range b.peers {
+		b.pruneLearnedCandidatesLocked(key, peer, now)
 		peer.direct = netip.AddrPort{}
 		peer.latency = 0
 		peer.directAt = time.Time{}
@@ -309,7 +313,7 @@ func (b *Bind) ParseEndpoint(text string) (batchudp.Endpoint, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &logicalEndpoint{bind: b, direct: addr}, nil
+		return &logicalEndpoint{bind: b, direct: unmapAddrPort(addr)}, nil
 	}
 	return nil, fmt.Errorf("tailnet: unsupported endpoint %q", text)
 }
@@ -410,6 +414,10 @@ func (b *Bind) UpdatePeer(config PeerConfig) {
 	config.Endpoints = sanitizeEndpoints(config.Endpoints)
 	b.mu.Lock()
 	state := b.peers[config.NodeKey]
+	if state != nil && peerConfigsEqual(state.config, config) {
+		b.mu.Unlock()
+		return
+	}
 	if state == nil {
 		state = &peerState{}
 		b.peers[config.NodeKey] = state
@@ -425,6 +433,7 @@ func (b *Bind) UpdatePeer(config PeerConfig) {
 	}
 	state.config = config
 	state.candidates = slices.Clone(config.Endpoints)
+	state.learned = nil
 	state.lastProbe = time.Time{}
 	for _, candidate := range state.candidates {
 		b.byAddr[candidate] = config.NodeKey
@@ -475,6 +484,10 @@ func (b *Bind) RemovePeer(key controlproto.NodePublic) {
 func (b *Bind) UpdateDERPMap(derpMap *controlproto.DERPMap, selfHome int64) {
 	copyMap := cloneDERPMap(derpMap)
 	b.mu.Lock()
+	if b.selfDERP == selfHome && reflect.DeepEqual(b.derpMap, copyMap) {
+		b.mu.Unlock()
+		return
+	}
 	b.derpMap = copyMap
 	b.selfDERP = selfHome
 	b.mu.Unlock()
@@ -574,17 +587,19 @@ func (b *Bind) maintain(ctx context.Context, generation uint64) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			b.mu.RLock()
+			b.mu.Lock()
 			if b.generation != generation || !b.open {
-				b.mu.RUnlock()
+				b.mu.Unlock()
 				return
 			}
 			selfDERP := b.selfDERP
 			keys := make([]controlproto.NodePublic, 0, len(b.peers))
-			for key := range b.peers {
+			now := time.Now()
+			for key, peer := range b.peers {
+				b.pruneLearnedCandidatesLocked(key, peer, now)
 				keys = append(keys, key)
 			}
-			b.mu.RUnlock()
+			b.mu.Unlock()
 			b.refreshLocalEndpoints(generation)
 			b.kickDiscovery()
 			for _, key := range keys {
@@ -608,6 +623,9 @@ func sanitizeEndpoints(endpoints []netip.AddrPort) []netip.AddrPort {
 		}
 		seen[endpoint] = true
 		result = append(result, endpoint)
+		if len(result) >= maxControlPeerEndpoints {
+			break
+		}
 	}
 	return result
 }
@@ -645,6 +663,7 @@ func (b *Bind) readUDP(ctx context.Context, generation uint64, conn gonnect.UDPC
 		if err != nil {
 			return
 		}
+		source = unmapAddrPort(source)
 		packet := buffer[:n]
 		if b.handleSTUN(packet) || (!b.cfg.DisableDiscovery && b.handleDisco(packet, source, controlproto.NodePublic{}, false)) {
 			continue
@@ -697,7 +716,26 @@ func addrPort(addr net.Addr) (netip.AddrPort, error) {
 	if addr == nil {
 		return netip.AddrPort{}, errors.New("nil address")
 	}
-	return netip.ParseAddrPort(addr.String())
+	value, err := netip.ParseAddrPort(addr.String())
+	if err != nil {
+		return netip.AddrPort{}, err
+	}
+	return unmapAddrPort(value), nil
+}
+
+func unmapAddrPort(value netip.AddrPort) netip.AddrPort {
+	if !value.IsValid() {
+		return value
+	}
+	return netip.AddrPortFrom(value.Addr().Unmap(), value.Port())
+}
+
+func peerConfigsEqual(a, b PeerConfig) bool {
+	return a.NodeKey == b.NodeKey &&
+		a.DiscoKey == b.DiscoKey &&
+		slices.Equal(a.Endpoints, b.Endpoints) &&
+		a.HomeDERP == b.HomeDERP &&
+		a.WireGuardOnly == b.WireGuardOnly
 }
 
 type logicalEndpoint struct {

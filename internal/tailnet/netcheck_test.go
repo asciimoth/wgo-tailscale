@@ -17,6 +17,25 @@ import (
 	"github.com/asciimoth/wgo-tailscale/internal/controlproto"
 )
 
+type mappedLookupNetwork struct {
+	gonnect.Network
+	address netip.Addr
+}
+
+func (n *mappedLookupNetwork) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
+	return []netip.Addr{n.address}, nil
+}
+
+type recordingUDPConn struct {
+	gonnect.UDPConn
+	destination netip.AddrPort
+}
+
+func (c *recordingUDPConn) WriteToUDPAddrPort(packet []byte, destination netip.AddrPort) (int, error) {
+	c.destination = destination
+	return len(packet), nil
+}
+
 func TestSelectDERPProbeTargetsIncludesHome(t *testing.T) {
 	regions := make(map[int64]*controlproto.DERPRegion)
 	for id := int64(1); id <= 5; id++ {
@@ -45,6 +64,37 @@ func TestSelectDERPProbeTargetsIncludesHome(t *testing.T) {
 	}
 	if full := selectDERPProbeTargets(&controlproto.DERPMap{Regions: regions}, 5, latest, true); len(full) != 5 {
 		t.Fatalf("full targets = %d, want 5", len(full))
+	}
+}
+
+func TestDERPProbeTargetLimitIncludesHome(t *testing.T) {
+	targets := make([]derpProbeTarget, 100)
+	for index := range targets {
+		targets[index].regionID = int64(index + 1)
+	}
+	limited := limitDERPProbeTargets(targets, 100, maxFullDERPRegions)
+	if len(limited) != maxFullDERPRegions {
+		t.Fatalf("limited targets = %d, want %d", len(limited), maxFullDERPRegions)
+	}
+	if !slices.ContainsFunc(limited, func(target derpProbeTarget) bool { return target.regionID == 100 }) {
+		t.Fatal("limited targets do not contain the home region")
+	}
+}
+
+func TestQuerySTUNUnmapsResolvedIPv4Address(t *testing.T) {
+	mapped := netip.MustParseAddr("::ffff:192.0.2.10")
+	want := netip.MustParseAddrPort("192.0.2.10:3478")
+	network := &mappedLookupNetwork{Network: gonnect.NativeConfig{}.Build(), address: mapped}
+	conn := &recordingUDPConn{}
+	ctx := t.Context()
+	bind := &Bind{
+		cfg: Config{Network: network}, open: true, ctx: ctx, conn: conn,
+		stunPending: make(map[[12]byte]stunProbe),
+		derpCheck:   &derpCheckRound{id: 1, remaining: 1},
+	}
+	bind.querySTUN(ctx, 1, 1, &controlproto.DERPNode{HostName: "stun.example.test"})
+	if conn.destination != want {
+		t.Fatalf("STUN destination = %v, want %v", conn.destination, want)
 	}
 }
 

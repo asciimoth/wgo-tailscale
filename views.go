@@ -197,12 +197,13 @@ func (c *Client) dnsViewLocked() DNSView {
 		view.Routes = cloneRawMessageMap(c.dns.Routes)
 		for _, record := range c.dns.ExtraRecords {
 			typeName := strings.ToUpper(record.Type)
-			if typeName == "" {
-				if address, err := netip.ParseAddr(record.Value); err == nil {
+			if address, err := netip.ParseAddr(record.Value); err == nil && (typeName == "" || typeName == "A" || typeName == "AAAA") {
+				address = address.Unmap()
+				record.Value = address.String()
+				if typeName == "" || address.Is4() {
 					typeName = "A"
-					if address.Is6() {
-						typeName = "AAAA"
-					}
+				} else {
+					typeName = "AAAA"
 				}
 			}
 			view.Records = append(view.Records, DNSRecord{Name: record.Name, Type: typeName, Value: record.Value})
@@ -213,11 +214,12 @@ func (c *Client) dnsViewLocked() DNSView {
 			return
 		}
 		for _, prefix := range node.Addresses {
+			address := prefix.Addr().Unmap()
 			typeName := "A"
-			if prefix.Addr().Is6() {
+			if address.Is6() {
 				typeName = "AAAA"
 			}
-			view.Records = append(view.Records, DNSRecord{Name: node.Name, Type: typeName, Value: prefix.Addr().String()})
+			view.Records = append(view.Records, DNSRecord{Name: node.Name, Type: typeName, Value: address.String()})
 		}
 	}
 	addNode(c.self)

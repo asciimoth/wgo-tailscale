@@ -37,6 +37,8 @@ type Client struct {
 	wg             sync.WaitGroup
 	reconcileMu    sync.Mutex
 	cacheMu        sync.Mutex
+	pingMu         sync.Mutex
+	pingPending    map[string]bool
 
 	deviceMu         sync.RWMutex
 	deviceAPI        device.DeviceAPI
@@ -54,6 +56,8 @@ type Client struct {
 	interactionID  uint64
 	resume         chan struct{}
 	endpointWake   chan struct{}
+	reconcileWake  chan struct{}
+	pingWake       chan controlproto.PingRequest
 	authenticated  bool
 	lastPingURL    string
 	lastBrowserURL string
@@ -126,20 +130,23 @@ func New(network gonnect.Network, api device.DeviceAPI, options Options) (*Clien
 		return nil, err
 	}
 	return &Client{
-		network:      network,
-		deviceAPI:    api,
-		opts:         opts,
-		done:         make(chan struct{}),
-		state:        StateNew,
-		at:           time.Now(),
-		resume:       make(chan struct{}, 1),
-		endpointWake: make(chan struct{}, 1),
-		confirmed:    make(map[string]bool),
-		peers:        make(map[int64]*controlproto.Node),
-		peerLocal:    make(map[controlproto.NodePublic]*peerLocalState),
-		applied:      make(map[controlproto.NodePublic]appliedPeer),
-		namedFilters: make(map[string][]controlproto.FilterRule),
-		derpLatency:  make(map[int64]tailnet.DERPRegionLatency),
+		network:       network,
+		deviceAPI:     api,
+		opts:          opts,
+		done:          make(chan struct{}),
+		state:         StateNew,
+		at:            time.Now(),
+		resume:        make(chan struct{}, 1),
+		endpointWake:  make(chan struct{}, 1),
+		reconcileWake: make(chan struct{}, 1),
+		pingWake:      make(chan controlproto.PingRequest, maxPendingControlPings),
+		pingPending:   make(map[string]bool),
+		confirmed:     make(map[string]bool),
+		peers:         make(map[int64]*controlproto.Node),
+		peerLocal:     make(map[controlproto.NodePublic]*peerLocalState),
+		applied:       make(map[controlproto.NodePublic]appliedPeer),
+		namedFilters:  make(map[string][]controlproto.FilterRule),
+		derpLatency:   make(map[int64]tailnet.DERPRegionLatency),
 	}, nil
 }
 
@@ -291,9 +298,11 @@ func (c *Client) initializeRuntime(ctx context.Context, api device.DeviceAPI) er
 // launchRuntimeLocked starts the identity-bound workers once. The caller must
 // hold lifeMu so Close cannot begin while workers are added to the wait group.
 func (c *Client) launchRuntimeLocked(ctx context.Context) {
-	c.wg.Add(2)
+	c.wg.Add(4)
 	go func() { defer c.wg.Done(); c.run(ctx) }()
 	go func() { defer c.wg.Done(); c.endpointUpdater(ctx) }()
+	go func() { defer c.wg.Done(); c.peerReconciler(ctx) }()
+	go func() { defer c.wg.Done(); c.controlPingWorker(ctx) }()
 }
 
 // Close stops only resources and peers owned by this client. It does not stop
@@ -681,9 +690,25 @@ func (c *Client) signalEndpointUpdate() {
 }
 
 func (c *Client) onPath(update tailnet.PathUpdate) {
+	update.Direct = unmapAddrPort(update.Direct)
 	c.mu.Lock()
+	if c.state == StateStopping || c.state == StateStopped {
+		c.mu.Unlock()
+		return
+	}
 	local := c.peerLocal[update.NodeKey]
 	if local == nil {
+		known := false
+		for _, peer := range c.peers {
+			if peer != nil && peer.Key == update.NodeKey {
+				known = true
+				break
+			}
+		}
+		if !known {
+			c.mu.Unlock()
+			return
+		}
 		local = &peerLocalState{}
 		c.peerLocal[update.NodeKey] = local
 	}
@@ -691,6 +716,7 @@ func (c *Client) onPath(update tailnet.PathUpdate) {
 	if update.Kind == "direct" {
 		newPath = PathDirect
 	}
+	endpointChanged := local.path != newPath || local.direct != update.Direct
 	if local.path == newPath && local.direct == update.Direct && local.latency == update.Latency {
 		c.mu.Unlock()
 		return
@@ -701,9 +727,43 @@ func (c *Client) onPath(update tailnet.PathUpdate) {
 	event := c.eventLocked(EventPeerPath, nil)
 	c.mu.Unlock()
 	c.events.publish(event)
-	if c.opts.UseDefaultTransportForDirectPeers {
-		go c.reconcilePeers()
+	if c.opts.UseDefaultTransportForDirectPeers && endpointChanged {
+		c.requestPeerReconcile()
 	}
+}
+
+// requestPeerReconcile coalesces asynchronous path changes for the runtime
+// reconcile worker.
+func (c *Client) requestPeerReconcile() {
+	select {
+	case c.reconcileWake <- struct{}{}:
+	default:
+	}
+}
+
+func (c *Client) peerReconciler(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.reconcileWake:
+			c.reconcilePeers()
+		}
+	}
+}
+
+func unmapAddrPort(value netip.AddrPort) netip.AddrPort {
+	if !value.IsValid() {
+		return value
+	}
+	return netip.AddrPortFrom(value.Addr().Unmap(), value.Port())
+}
+
+func unmapPrefix(value netip.Prefix) netip.Prefix {
+	if !value.IsValid() || !value.Addr().Is4In6() || value.Bits() < 96 {
+		return value
+	}
+	return netip.PrefixFrom(value.Addr().Unmap(), value.Bits()-96).Masked()
 }
 
 func (c *Client) onDERPLatency(report tailnet.DERPLatencyReport) {
@@ -815,9 +875,7 @@ func (c *Client) removeOwnedPeers() error {
 	c.mu.Lock()
 	for _, key := range keys {
 		delete(c.applied, key)
-		if local := c.peerLocal[key]; local != nil {
-			local.applied = false
-		}
+		delete(c.peerLocal, key)
 	}
 	c.mu.Unlock()
 	return errors.Join(errs...)
