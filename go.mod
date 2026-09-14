@@ -6,14 +6,14 @@ require (
 	github.com/asciimoth/batchudp v0.3.15
 	github.com/asciimoth/gonnect v0.51.0
 	github.com/asciimoth/gonnect-netstack v0.6.4
-	github.com/asciimoth/wgo v0.7.5
+	github.com/asciimoth/wgo v0.7.6
 	golang.org/x/crypto v0.51.0
 	golang.org/x/net v0.54.0
 )
 
 require (
 	github.com/asciimoth/bufpool v0.3.0 // indirect
-	github.com/asciimoth/tuntap v0.3.34 // indirect
+	github.com/asciimoth/tuntap v0.4.0 // indirect
 	github.com/google/btree v1.1.2 // indirect
 	golang.org/x/exp v0.0.0-20231110203233-9a3e6036ecaa // indirect
 	golang.org/x/sys v0.44.0 // indirect
