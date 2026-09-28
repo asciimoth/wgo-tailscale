@@ -5,8 +5,8 @@ go 1.25.5
 require (
 	github.com/asciimoth/batchudp v0.3.18
 	github.com/asciimoth/gonnect v0.55.0
-	github.com/asciimoth/gonnect-netstack v0.8.1
-	github.com/asciimoth/wgo v0.7.12
+	github.com/asciimoth/gonnect-netstack v0.9.0
+	github.com/asciimoth/wgo v0.7.14
 	golang.org/x/crypto v0.51.0
 	golang.org/x/net v0.54.0
 )

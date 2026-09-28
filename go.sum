@@ -4,12 +4,12 @@ github.com/asciimoth/bufpool v0.3.0 h1:tQMop/kZ3eOLSorM9i0cqtOIpxWQUroGZ6oNk5DTn
 github.com/asciimoth/bufpool v0.3.0/go.mod h1:JV6H4hpj2bCS5Svr0wNqR+XOZFOOkdXfNZxCjm/3QHw=
 github.com/asciimoth/gonnect v0.55.0 h1:9pgqRF/zikzDLgxFBEXIV390QGgnnrDlIMqb3KXTL/c=
 github.com/asciimoth/gonnect v0.55.0/go.mod h1:W5OAXiqFw48MTm54+dPua9calyVjez/uqjcbrQwcvPU=
-github.com/asciimoth/gonnect-netstack v0.8.1 h1:d0mYClTutWKOk0gfssxKgwS5zz7yyz24TLjEHiohiWA=
-github.com/asciimoth/gonnect-netstack v0.8.1/go.mod h1:4KzYndt6XD+WdQ5j/j1yyBRBufXDRRN7AezilYoJkOM=
+github.com/asciimoth/gonnect-netstack v0.9.0 h1:ch/3IkLWdiotQJbKavf3vLBOOWmm3/fDO6eFZ6eXRDM=
+github.com/asciimoth/gonnect-netstack v0.9.0/go.mod h1:4KzYndt6XD+WdQ5j/j1yyBRBufXDRRN7AezilYoJkOM=
 github.com/asciimoth/tuntap v0.4.3 h1:MCpPk/KdvcE6bsXD8bwHMvH2LbzVeG4K+Efps1ASTZs=
 github.com/asciimoth/tuntap v0.4.3/go.mod h1:ePE0O+Z6SoZDOzb9FjPmRjobxT7aVr3RiDAKyiWDCCk=
-github.com/asciimoth/wgo v0.7.12 h1:k4vQIzTsXnlu21Nm+GbXmnH55S/IeoC6hcGoe0uLiuo=
-github.com/asciimoth/wgo v0.7.12/go.mod h1:7udXKpE5+aBTj+SRfS3kl0lPlFhRoeztzPPwxIE3WK0=
+github.com/asciimoth/wgo v0.7.14 h1:cbILlCYLJk6z48q8w+LATm4IRDqTGnhR2rgF0sNPoSk=
+github.com/asciimoth/wgo v0.7.14/go.mod h1:l65skEawm0cRBDwI8E4H+Apd72eUHsvjoYYObp5c1Mc=
 github.com/google/btree v1.1.2 h1:xf4v41cLI2Z6FxbKm+8Bu+m8ifhj15JuZ9sa0jZCMUU=
 github.com/google/btree v1.1.2/go.mod h1:qOPhT0dTNdNzV6Z/lhRX0YXUafgPLFUh+gZMl761Gm4=
 golang.org/x/crypto v0.51.0 h1:IBPXwPfKxY7cWQZ38ZCIRPI50YLeevDLlLnyC5wRGTI=
