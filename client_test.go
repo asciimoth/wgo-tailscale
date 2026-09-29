@@ -26,6 +26,7 @@ type fakeDevice struct {
 	mu         sync.Mutex
 	private    device.NoisePrivateKey
 	peers      map[device.NoisePublicKey]device.PeerSpec
+	snapshots  map[device.NoisePublicKey]device.PeerSnapshot
 	transports map[device.TransportID]device.TransportConfig
 	deleteErr  error
 	done       chan struct{}
@@ -46,6 +47,7 @@ func newFakeDevice(t *testing.T) *fakeDevice {
 	}
 	return &fakeDevice{
 		private: private, peers: make(map[device.NoisePublicKey]device.PeerSpec),
+		snapshots:  make(map[device.NoisePublicKey]device.PeerSnapshot),
 		transports: make(map[device.TransportID]device.TransportConfig), done: make(chan struct{}),
 	}
 }
@@ -83,6 +85,17 @@ func (d *fakeDevice) PeerSpec(key device.NoisePublicKey) (device.PeerSpec, bool)
 	defer d.mu.Unlock()
 	spec, found := d.peers[key]
 	return cloneTestSpec(spec), found
+}
+func (d *fakeDevice) PeerSnapshot(key device.NoisePublicKey) (device.PeerSnapshot, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	spec, found := d.peers[key]
+	if !found {
+		return device.PeerSnapshot{}, false
+	}
+	snapshot := d.snapshots[key]
+	snapshot.Spec = cloneTestSpec(spec)
+	return snapshot, true
 }
 func (d *fakeDevice) AddTransport(id device.TransportID, config device.TransportConfig) error {
 	d.mu.Lock()
@@ -371,6 +384,112 @@ func TestDefaultTransportForKnownDirectPathUsesWGODefault(t *testing.T) {
 	}
 	if spec.Endpoint.Transport != device.DefaultTransportID || spec.Endpoint.Address != wantDirect.String() {
 		t.Fatalf("endpoint = %#v, want known direct endpoint", spec.Endpoint)
+	}
+}
+
+func TestDirectPathRecoveryUsesWireGuardHandshakeHealth(t *testing.T) {
+	now := time.Now()
+	direct := netip.MustParseAddrPort("198.51.100.20:41641")
+	newClient := func(t *testing.T, connected bool, selectedAt time.Time) (*Client, *fakeDevice, *controlproto.Node) {
+		t.Helper()
+		dev := newFakeDevice(t)
+		client, err := New(gonnect.NativeConfig{}.Build(), dev, Options{
+			Hostname: "direct-recovery", TLSConfig: testTLSConfig(),
+			UseDefaultTransportForDirectPeers: true, DisableDERP: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		peer := newControlNode(t, 2, "recovery-peer", "recovery.example.test", "100.64.0.2/32")
+		if err := client.applyMapResponse(controlproto.MapResponse{Peers: []*controlproto.Node{peer}}); err != nil {
+			t.Fatal(err)
+		}
+		client.onPath(tailnet.PathUpdate{NodeKey: peer.Key, Kind: "direct", Direct: direct, At: selectedAt})
+		client.reconcilePeers()
+		key := device.NoisePublicKey(peer.Key)
+		dev.mu.Lock()
+		dev.snapshots[key] = device.PeerSnapshot{Active: true, Connected: connected}
+		dev.mu.Unlock()
+		return client, dev, peer
+	}
+
+	t.Run("healthy handshake", func(t *testing.T) {
+		client, _, _ := newClient(t, true, now.Add(-directPathHandshakeGrace-time.Second))
+		if client.recoverStaleDirectPaths(now) {
+			t.Fatal("connected peer entered direct-path recovery")
+		}
+	})
+	t.Run("initial handshake grace", func(t *testing.T) {
+		client, _, _ := newClient(t, false, now.Add(-directPathHandshakeGrace+time.Second))
+		if client.recoverStaleDirectPaths(now) {
+			t.Fatal("peer entered recovery during the initial handshake grace period")
+		}
+	})
+	t.Run("failed handshake", func(t *testing.T) {
+		client, _, peer := newClient(t, false, now.Add(-directPathHandshakeGrace-time.Second))
+		if !client.recoverStaleDirectPaths(now) {
+			t.Fatal("peer with no usable handshake did not enter recovery")
+		}
+		local := client.peerLocal[peer.Key]
+		if !local.directRecovery || local.recoveryDirect != direct {
+			t.Fatalf("recovery state = %#v", local)
+		}
+	})
+}
+
+func TestDirectPathRecoverySurvivesDiscoAndRepeatedMappingChanges(t *testing.T) {
+	dev := newFakeDevice(t)
+	client, err := New(gonnect.NativeConfig{}.Build(), dev, Options{
+		Hostname: "repeated-direct-recovery", TLSConfig: testTLSConfig(),
+		UseDefaultTransportForDirectPeers: true, DisableDERP: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := newControlNode(t, 2, "repeated-recovery-peer", "repeated.example.test", "100.64.0.2/32")
+	if err := client.applyMapResponse(controlproto.MapResponse{Peers: []*controlproto.Node{peer}}); err != nil {
+		t.Fatal(err)
+	}
+	key := device.NoisePublicKey(peer.Key)
+
+	for iteration := 1; iteration <= 3; iteration++ {
+		direct := netip.AddrPortFrom(netip.AddrFrom4([4]byte{198, 51, 100, byte(20 + iteration)}), uint16(41640+iteration))
+		selectedAt := time.Now().Add(-directPathHandshakeGrace - time.Second)
+		client.onPath(tailnet.PathUpdate{
+			NodeKey: peer.Key, Kind: "direct", Direct: direct,
+			Latency: time.Duration(iteration) * time.Millisecond, At: selectedAt,
+		})
+		client.reconcilePeers()
+		assertTestPeerEndpoint(t, dev, key, device.DefaultTransportID, direct.String())
+
+		dev.mu.Lock()
+		dev.snapshots[key] = device.PeerSnapshot{Active: true, Connected: false}
+		dev.mu.Unlock()
+		if !client.recoverStaleDirectPaths(time.Now()) {
+			t.Fatalf("iteration %d did not start recovery", iteration)
+		}
+		client.reconcilePeers()
+		assertTestPeerEndpoint(t, dev, key, DefaultTransportID, peer.Key.String())
+
+		// Authenticated DISCO traffic can update latency for the same address.
+		// It must not put WireGuard back on the failed default endpoint.
+		client.onPath(tailnet.PathUpdate{
+			NodeKey: peer.Key, Kind: "direct", Direct: direct,
+			Latency: time.Duration(iteration+10) * time.Millisecond, At: time.Now(),
+		})
+		client.reconcilePeers()
+		assertTestPeerEndpoint(t, dev, key, DefaultTransportID, peer.Key.String())
+		if local := client.peerLocal[peer.Key]; !local.directRecovery || local.directSince != selectedAt {
+			t.Fatalf("iteration %d DISCO update reset recovery: %#v", iteration, local)
+		}
+	}
+}
+
+func assertTestPeerEndpoint(t *testing.T, dev *fakeDevice, key device.NoisePublicKey, transport device.TransportID, address string) {
+	t.Helper()
+	spec, exists := dev.PeerSpec(key)
+	if !exists || spec.Endpoint == nil || spec.Endpoint.Transport != transport || spec.Endpoint.Address != address {
+		t.Fatalf("peer endpoint = %#v, %v; want transport %q address %q", spec.Endpoint, exists, transport, address)
 	}
 }
 

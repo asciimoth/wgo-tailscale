@@ -98,13 +98,21 @@ type Client struct {
 }
 
 type peerLocalState struct {
-	applied bool
-	path    PathKind
-	direct  netip.AddrPort
-	latency time.Duration
-	pathAt  time.Time
-	err     string
+	applied        bool
+	path           PathKind
+	direct         netip.AddrPort
+	latency        time.Duration
+	pathAt         time.Time
+	directSince    time.Time
+	directRecovery bool
+	recoveryDirect netip.AddrPort
+	err            string
 }
+
+const (
+	directPathHealthInterval = 5 * time.Second
+	directPathHandshakeGrace = 2 * time.Minute
+)
 
 type appliedPeer struct {
 	id          string
@@ -298,10 +306,11 @@ func (c *Client) initializeRuntime(ctx context.Context, api device.DeviceAPI) er
 // launchRuntimeLocked starts the identity-bound workers once. The caller must
 // hold lifeMu so Close cannot begin while workers are added to the wait group.
 func (c *Client) launchRuntimeLocked(ctx context.Context) {
-	c.wg.Add(4)
+	c.wg.Add(5)
 	go func() { defer c.wg.Done(); c.run(ctx) }()
 	go func() { defer c.wg.Done(); c.endpointUpdater(ctx) }()
 	go func() { defer c.wg.Done(); c.peerReconciler(ctx) }()
+	go func() { defer c.wg.Done(); c.directPathHealthWorker(ctx) }()
 	go func() { defer c.wg.Done(); c.controlPingWorker(ctx) }()
 }
 
@@ -723,6 +732,18 @@ func (c *Client) onPath(update tailnet.PathUpdate) {
 	}
 	local.path = newPath
 	local.direct, local.latency, local.pathAt = update.Direct, update.Latency, update.At
+	if endpointChanged {
+		local.directSince = update.At
+		if local.directSince.IsZero() {
+			local.directSince = time.Now()
+		}
+		// Recovery is specific to one direct endpoint. A different endpoint
+		// gets a new opportunity to use wgo's default UDP transport.
+		if newPath != PathDirect || update.Direct != local.recoveryDirect {
+			local.directRecovery = false
+			local.recoveryDirect = netip.AddrPort{}
+		}
+	}
 	c.bumpLocked()
 	event := c.eventLocked(EventPeerPath, nil)
 	c.mu.Unlock()
@@ -750,6 +771,61 @@ func (c *Client) peerReconciler(ctx context.Context) {
 			c.reconcilePeers()
 		}
 	}
+}
+
+func (c *Client) directPathHealthWorker(ctx context.Context) {
+	if !c.opts.UseDefaultTransportForDirectPeers {
+		return
+	}
+	ticker := time.NewTicker(directPathHealthInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			if c.recoverStaleDirectPaths(now) {
+				c.requestPeerReconcile()
+			}
+		}
+	}
+}
+
+// recoverStaleDirectPaths moves peers with an unusable WireGuard handshake
+// back to the managed transport. DISCO updates for the same UDP address do not
+// cancel recovery because they do not prove that WireGuard works.
+func (c *Client) recoverStaleDirectPaths(now time.Time) bool {
+	c.deviceMu.RLock()
+	api := c.deviceAPI
+	if nilDeviceAPI(api) || closedDeviceAPI(api) {
+		c.deviceMu.RUnlock()
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	defer c.deviceMu.RUnlock()
+
+	changed := false
+	for key, local := range c.peerLocal {
+		if local == nil || !local.applied || local.path != PathDirect ||
+			!local.direct.IsValid() || local.directRecovery || local.directSince.IsZero() ||
+			now.Sub(local.directSince) < directPathHandshakeGrace {
+			continue
+		}
+		applied, owned := c.applied[key]
+		if !owned || !applied.hasEndpoint || applied.endpoint.Transport != device.DefaultTransportID ||
+			applied.endpoint.Address != local.direct.String() {
+			continue
+		}
+		snapshot, exists := api.PeerSnapshot(device.NoisePublicKey(key))
+		if !exists || snapshot.Connected {
+			continue
+		}
+		local.directRecovery = true
+		local.recoveryDirect = local.direct
+		changed = true
+	}
+	return changed
 }
 
 func unmapAddrPort(value netip.AddrPort) netip.AddrPort {

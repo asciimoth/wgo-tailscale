@@ -539,11 +539,12 @@ func markNodeExpired(node *controlproto.Node, now time.Time) bool {
 }
 
 type desiredPeer struct {
-	node     *controlproto.Node
-	id       string
-	homeDERP int64
-	path     PathKind
-	direct   netip.AddrPort
+	node           *controlproto.Node
+	id             string
+	homeDERP       int64
+	path           PathKind
+	direct         netip.AddrPort
+	directRecovery bool
 }
 
 func (c *Client) reconcilePeers() {
@@ -567,13 +568,15 @@ func (c *Client) reconcilePeers() {
 			}
 			var path PathKind
 			var direct netip.AddrPort
+			var directRecovery bool
 			if local := c.peerLocal[node.Key]; local != nil {
 				path = local.path
 				direct = local.direct
+				directRecovery = local.directRecovery
 			}
 			desired[node.Key] = desiredPeer{
 				node: cloneControlNode(node), id: id, homeDERP: home,
-				path: path, direct: direct,
+				path: path, direct: direct, directRecovery: directRecovery,
 			}
 		}
 	}
@@ -708,6 +711,9 @@ func peerSpecsEqual(a, b device.PeerSpec) bool {
 
 func (c *Client) peerEndpoint(peer desiredPeer) *device.PeerEndpoint {
 	if c.opts.UseDefaultTransportForDirectPeers {
+		if peer.directRecovery {
+			return &device.PeerEndpoint{Transport: c.opts.TransportID, Address: peer.node.Key.String()}
+		}
 		if direct := unmapAddrPort(peer.direct); peer.path == PathDirect && direct.IsValid() {
 			return &device.PeerEndpoint{Transport: device.DefaultTransportID, Address: direct.String()}
 		}
