@@ -93,6 +93,11 @@ go test -race ./...
 go vet ./...
 ```
 
+Run the untrusted-input fuzz targets for one minute with `just fuzzing`. Set
+`FUZZ_TIME` to use a different Go duration, for example
+`FUZZ_TIME=10m just fuzzing`. The `just check` recipe includes fuzzing, but
+skips it when `GITHUB_ACTIONS=true`.
+
 The Headscale Docker scenario and optional hosted-service test are under
 [`tests/e2e`](tests/e2e/README.md); run the container cycle with
 `./tests/e2e/run.sh` (it skips if Docker is unavailable). Protocol extensions

@@ -362,29 +362,37 @@ func (c *Client) MapStream(ctx context.Context, request MapRequest, onResponse f
 		return fmt.Errorf("map stream: %s: %.500s", res.Status, body)
 	}
 	for {
-		var sizeBytes [4]byte
-		if _, err := io.ReadFull(res.Body, sizeBytes[:]); err != nil {
+		response, err := readMapResponse(res.Body)
+		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			return err
 		}
-		size := binary.LittleEndian.Uint32(sizeBytes[:])
-		if size > maxControlBody {
-			return fmt.Errorf("map response frame too large: %d", size)
-		}
-		body := make([]byte, size)
-		if _, err := io.ReadFull(res.Body, body); err != nil {
-			return err
-		}
-		var response MapResponse
-		if err := json.Unmarshal(body, &response); err != nil {
-			return fmt.Errorf("decode map response: %w", err)
-		}
 		if err := onResponse(response); err != nil {
 			return err
 		}
 	}
+}
+
+func readMapResponse(reader io.Reader) (MapResponse, error) {
+	var sizeBytes [4]byte
+	if _, err := io.ReadFull(reader, sizeBytes[:]); err != nil {
+		return MapResponse{}, err
+	}
+	size := binary.LittleEndian.Uint32(sizeBytes[:])
+	if size > maxControlBody {
+		return MapResponse{}, fmt.Errorf("map response frame too large: %d", size)
+	}
+	body := make([]byte, size)
+	if _, err := io.ReadFull(reader, body); err != nil {
+		return MapResponse{}, err
+	}
+	var response MapResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return MapResponse{}, fmt.Errorf("decode map response: %w", err)
+	}
+	return response, nil
 }
 
 func (c *Client) MapUpdate(ctx context.Context, request MapRequest) error {

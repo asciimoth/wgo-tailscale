@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/asciimoth/gonnect"
 	"github.com/asciimoth/wgo-tailscale/internal/controlproto"
@@ -982,5 +983,9 @@ func peerID(node *controlproto.Node) string {
 }
 
 func normalizeDNSName(value string) string {
-	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(value), "."))
+	value = strings.TrimLeftFunc(value, unicode.IsSpace)
+	value = strings.TrimRightFunc(value, func(character rune) bool {
+		return character == '.' || unicode.IsSpace(character)
+	})
+	return strings.ToLower(value)
 }
